@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68,<83"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hr-ai-agent"
+version = "1.0.0"
+description = "Production HR AI Agent built on Nous Research Hermes Agent Framework"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+license = { text = "MIT" }
+authors = [{ name = "HR AI Agent Team" }]
+dependencies = [
+  "fastapi>=0.115.0,<1.0.0",
+  "uvicorn[standard]>=0.32.0,<1.0.0",
+  "pydantic>=2.9.0,<3.0.0",
+  "pydantic-settings>=2.6.0,<3.0.0",
+  "httpx>=0.28.0,<1.0.0",
+  "PyYAML>=6.0.2,<7.0.0",
+  "python-dotenv>=1.0.1,<2.0.0",
+  "python-json-logger>=2.0.7,<4.0.0",
+  "typing-extensions>=4.12.0,<5.0.0",
+]
+
+[project.scripts]
+hr-agent = "app.main:main"
+
+[tool.setuptools]
+include-package-data = true
+# Explicit packages: hr_tools maps to filesystem directory tools/
+packages = ["hr_tools", "agents", "app"]
+
+[tool.setuptools.package-dir]
+hr_tools = "tools"
+agents = "agents"
+app = "app"
+
+[tool.setuptools.package-data]
+hr_tools = ["py.typed"]

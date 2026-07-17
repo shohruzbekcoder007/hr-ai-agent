@@ -1,0 +1,6 @@
+name: hr-employee
+version: "1.0.0"
+description: >
+  HR employee directory tools backed by employees.json.
+  Extends Hermes with search, department, salary, and statistics tools
+  without modifying Hermes core.

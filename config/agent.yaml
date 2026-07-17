@@ -1,0 +1,39 @@
+# HR Agent runtime configuration (non-secret settings)
+# Secrets belong in .env — never put API keys here.
+
+agent:
+  name: hr-ai-agent
+  domain: human_resources
+  description: >
+    Specialized HR assistant that answers employee-related questions
+    exclusively from the local employees.json knowledge base.
+
+  model: ${HR_MODEL:-anthropic/claude-sonnet-4.6}
+  max_iterations: 20
+  quiet_mode: true
+  skip_memory: true
+  skip_context_files: true
+  enabled_toolsets:
+    - hr
+
+  system_prompt_path: ${SYSTEM_PROMPT_PATH:-/app/prompts/system_prompt.md}
+  employees_json_path: ${EMPLOYEES_JSON_PATH:-/app/data/employees.json}
+
+  response:
+    default_format: natural_language
+    allow_json: true
+    allow_markdown_table: true
+    refuse_out_of_domain: true
+    never_hallucinate: true
+    no_data_message: "No data found"
+
+  privacy:
+    # Salary and personal contact data are available via tools;
+    # the system prompt instructs careful handling.
+    mask_salary_by_default: false
+
+api:
+  host: ${APP_HOST:-0.0.0.0}
+  port: ${APP_PORT:-8080}
+  cors_origins: ${CORS_ORIGINS:-*}
+  session_history_limit: ${HR_SESSION_HISTORY_LIMIT:-20}

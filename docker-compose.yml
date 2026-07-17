@@ -1,0 +1,107 @@
+# =============================================================================
+# HR AI Agent — Production Docker Compose
+# Single service: Hermes + specialized HR Agent (no GUI / no desktop)
+# =============================================================================
+
+name: hr-ai-agent
+
+services:
+  hr-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        HERMES_REPO: https://github.com/NousResearch/hermes-agent.git
+        HERMES_REF: main
+    image: hr-ai-agent:1.0.0
+    container_name: hr-ai-agent
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    environment:
+      APP_NAME: ${APP_NAME:-hr-ai-agent}
+      APP_ENV: ${APP_ENV:-production}
+      APP_HOST: 0.0.0.0
+      APP_PORT: 8080
+      TZ: ${TZ:-UTC}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_DIR: /app/logs
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      LOG_MAX_BYTES: ${LOG_MAX_BYTES:-10485760}
+      LOG_BACKUP_COUNT: ${LOG_BACKUP_COUNT:-10}
+      HERMES_HOME: /home/hermes/.hermes
+      HERMES_ENABLE_PROJECT_PLUGINS: "true"
+      HERMES_TUI: "0"
+      HERMES_SKIP_DESKTOP: "1"
+      HR_APP_ROOT: /app
+      EMPLOYEES_JSON_PATH: /app/data/employees.json
+      SYSTEM_PROMPT_PATH: /app/prompts/system_prompt.md
+      HR_MODEL: ${HR_MODEL:-anthropic/claude-sonnet-4.6}
+      HR_MAX_ITERATIONS: ${HR_MAX_ITERATIONS:-20}
+      HR_QUIET_MODE: ${HR_QUIET_MODE:-true}
+      HR_SKIP_MEMORY: ${HR_SKIP_MEMORY:-true}
+      HR_SKIP_CONTEXT_FILES: ${HR_SKIP_CONTEXT_FILES:-true}
+      HR_ENABLED_TOOLSETS: ${HR_ENABLED_TOOLSETS:-hr}
+      HR_SESSION_HISTORY_LIMIT: ${HR_SESSION_HISTORY_LIMIT:-20}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      API_BEARER_TOKEN: ${API_BEARER_TOKEN:-}
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      HEALTHCHECK_URL: http://127.0.0.1:8080/health
+
+    ports:
+      - "${APP_PORT:-8080}:8080"
+
+    volumes:
+      # Mutable employee directory (hot-reload supported via reload_employees tool)
+      - ./data:/app/data:rw
+      # Persistent application logs
+      - ./logs:/app/logs:rw
+      # Optional: override system prompt without rebuild
+      - ./prompts:/app/prompts:ro
+      # Optional: override agent/hermes config
+      - ./config:/app/config:ro
+      # Hermes profile state (sessions, plugin enablement)
+      - hermes_home:/home/hermes/.hermes
+
+    networks:
+      - hr-net
+
+    healthcheck:
+      test: ["CMD", "/app/scripts/healthcheck.sh"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+        tag: "{{.Name}}"
+
+    security_opt:
+      - no-new-privileges:true
+
+    read_only: false
+    tmpfs:
+      - /tmp:size=64M,mode=1777
+
+    # Resource limits (Compose non-swarm). Tune per VM size.
+    cpus: 2.0
+    mem_limit: 2g
+    mem_reservation: 256m
+
+networks:
+  hr-net:
+    name: hr-ai-agent-net
+    driver: bridge
+
+volumes:
+  hermes_home:
+    name: hr-ai-agent-hermes-home
