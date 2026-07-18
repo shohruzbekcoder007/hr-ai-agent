@@ -108,6 +108,107 @@ def _register_tools() -> list[str]:
     return names
 
 
+def _env_nonempty(name: str) -> str | None:
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    raw = raw.strip()
+    return raw or None
+
+
+def _detect_llm_provider(model: str) -> str:
+    """
+    Resolve which LLM backend to use.
+
+    Hermes 0.18+ will not start an AIAgent with only an API key — it needs a
+    resolvable provider (or an explicit base_url + api_key pair).
+    """
+    explicit = (
+        _env_nonempty("HR_PROVIDER")
+        or _env_nonempty("HERMES_PROVIDER")
+        or ""
+    ).lower()
+    if explicit:
+        return explicit
+
+    model_l = (model or "").lower()
+    has_openrouter = bool(_env_nonempty("OPENROUTER_API_KEY"))
+    has_openai = bool(_env_nonempty("OPENAI_API_KEY"))
+    has_anthropic = bool(_env_nonempty("ANTHROPIC_API_KEY"))
+
+    # Model name hints take priority when the matching key is present.
+    if "claude" in model_l or model_l.startswith("anthropic/"):
+        if has_anthropic:
+            return "anthropic"
+        if has_openrouter:
+            return "openrouter"
+    if model_l.startswith("openai/") or model_l.startswith("gpt-") or model_l.startswith(
+        "o1"
+    ) or model_l.startswith("o3") or model_l.startswith("o4"):
+        if has_openai:
+            return "openai"
+        if has_openrouter:
+            return "openrouter"
+    if model_l.startswith("openrouter/") or "/" in model_l:
+        if has_openrouter:
+            return "openrouter"
+
+    if has_openrouter:
+        return "openrouter"
+    if has_openai:
+        return "openai"
+    if has_anthropic:
+        return "anthropic"
+    return ""
+
+
+def _resolve_api_key(provider: str, explicit: str | None = None) -> str | None:
+    if explicit:
+        return explicit
+    override = _env_nonempty("HR_API_KEY")
+    if override:
+        return override
+    if provider in {"openrouter"}:
+        return _env_nonempty("OPENROUTER_API_KEY")
+    if provider in {"openai", "openai-api", "custom"}:
+        return _env_nonempty("OPENAI_API_KEY")
+    if provider in {"anthropic"}:
+        return _env_nonempty("ANTHROPIC_API_KEY")
+    # Fallback order for unknown / empty provider
+    return (
+        _env_nonempty("OPENROUTER_API_KEY")
+        or _env_nonempty("OPENAI_API_KEY")
+        or _env_nonempty("ANTHROPIC_API_KEY")
+    )
+
+
+def _resolve_base_url(provider: str, explicit: str | None = None) -> str | None:
+    if explicit:
+        return explicit
+    configured = _env_nonempty("OPENAI_BASE_URL") or _env_nonempty("HR_BASE_URL")
+    if configured:
+        return configured
+    # Hermes library mode needs an explicit base_url for direct OpenAI;
+    # without it init fails with "No LLM provider configured".
+    if provider in {"openai", "openai-api"}:
+        return "https://api.openai.com/v1"
+    if provider == "openrouter":
+        return "https://openrouter.ai/api/v1"
+    return None
+
+
+def _reasoning_config() -> dict[str, Any]:
+    """
+    Hermes defaults to reasoning.effort which OpenAI rejects for gpt-4o* models.
+
+    Keep reasoning off unless HR_REASONING_ENABLED=true (for o-series / OR models).
+    """
+    if _env_bool("HR_REASONING_ENABLED", False):
+        effort = _env_nonempty("HR_REASONING_EFFORT") or "medium"
+        return {"enabled": True, "effort": effort}
+    return {"enabled": False}
+
+
 def _build_ai_agent(
     *,
     system_prompt: str,
@@ -128,15 +229,14 @@ def _build_ai_agent(
             "pip install git+https://github.com/NousResearch/hermes-agent.git"
         ) from exc
 
-    model = model or os.getenv("HR_MODEL") or os.getenv("HERMES_MODEL") or ""
-    api_key = (
-        api_key
-        or os.getenv("HR_API_KEY")
-        or os.getenv("OPENROUTER_API_KEY")
-        or os.getenv("OPENAI_API_KEY")
-        or os.getenv("ANTHROPIC_API_KEY")
-    )
-    base_url = base_url or os.getenv("OPENAI_BASE_URL") or os.getenv("HR_BASE_URL")
+    model = model or _env_nonempty("HR_MODEL") or _env_nonempty("HERMES_MODEL") or ""
+    provider = _detect_llm_provider(model)
+    api_key = _resolve_api_key(provider, api_key)
+    base_url = _resolve_base_url(provider, base_url)
+
+    # Sensible default model when only OpenAI is configured
+    if not model and provider in {"openai", "openai-api"}:
+        model = "gpt-4o-mini"
 
     enabled_raw = os.getenv("HR_ENABLED_TOOLSETS", "hr")
     enabled_toolsets = [t.strip() for t in enabled_raw.split(",") if t.strip()]
@@ -150,15 +250,29 @@ def _build_ai_agent(
         "skip_context_files": _env_bool("HR_SKIP_CONTEXT_FILES", True),
         "ephemeral_system_prompt": system_prompt,
         "platform": "hr-api",
+        "reasoning_config": _reasoning_config(),
     }
     if api_key:
         kwargs["api_key"] = api_key
     if base_url:
         kwargs["base_url"] = base_url
+    # Pass provider only when Hermes can resolve credentials for it; for OpenAI
+    # the reliable library path is api_key + base_url (provider alone fails).
+    if provider and provider not in {"openai", "openai-api", "custom"}:
+        kwargs["provider"] = provider
+
+    if not api_key:
+        logger.warning(
+            "No LLM API key resolved (provider=%r). Chat will fail until "
+            "OPENAI_API_KEY / OPENROUTER_API_KEY / ANTHROPIC_API_KEY is set.",
+            provider or "(none)",
+        )
 
     logger.info(
-        "Creating AIAgent model=%r toolsets=%s max_iterations=%s",
+        "Creating AIAgent model=%r provider=%r base_url=%r toolsets=%s max_iterations=%s",
         model or "(config default)",
+        provider or "(inferred later)",
+        base_url or "(default)",
         enabled_toolsets,
         kwargs["max_iterations"],
     )
@@ -205,12 +319,14 @@ class HRAgent:
             logger.info("Initializing HR Agent...")
             self._employee_readiness = _ensure_employee_data_loaded()
             tool_names = _register_tools()
-            # Smoke-import Hermes (fail fast if missing)
+            # Smoke-import Hermes (fail fast if missing / shadowed)
             try:
                 import run_agent  # noqa: F401  # type: ignore[import-not-found]
             except ImportError as exc:
                 raise RuntimeError(
-                    "Hermes Agent Framework (run_agent) is not importable"
+                    "Hermes Agent Framework (run_agent) is not importable: "
+                    f"{exc}. Ensure hermes-agent is installed and that a local "
+                    "package named 'tools' is not shadowing Hermes's tools package."
                 ) from exc
             self._initialized = True
             logger.info(

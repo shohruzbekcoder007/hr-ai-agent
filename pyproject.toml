@@ -27,11 +27,13 @@ hr-agent = "app.main:main"
 
 [tool.setuptools]
 include-package-data = true
-# Explicit packages: hr_tools maps to filesystem directory tools/
+# Package directory is hr_tools/ (not tools/) so we never shadow Hermes's
+# top-level tools package (tools.registry, etc.) when the project root is on
+# sys.path.
 packages = ["hr_tools", "agents", "app"]
 
 [tool.setuptools.package-dir]
-hr_tools = "tools"
+hr_tools = "hr_tools"
 agents = "agents"
 app = "app"
 

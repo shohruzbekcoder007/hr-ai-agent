@@ -33,7 +33,7 @@ def main() -> int:
 
     import types
 
-    svc_mod = _load("hr_tools.employee_service", ROOT / "tools" / "employee_service.py")
+    svc_mod = _load("hr_tools.employee_service", ROOT / "hr_tools" / "employee_service.py")
     pkg = types.ModuleType("hr_tools")
     pkg.employee_service = svc_mod  # type: ignore[attr-defined]
     sys.modules["hr_tools"] = pkg

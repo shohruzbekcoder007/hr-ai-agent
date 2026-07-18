@@ -28,9 +28,11 @@ def _ensure_app_on_path() -> None:
         Path(__file__).resolve().parents[2],  # project root when in-repo
     ]
     for root in candidates:
-        if (root / "tools" / "employee_service.py").is_file() or (
+        # Prefer hr_tools/ package dir (must not be named tools/ — that would
+        # shadow Hermes's top-level tools package when root is on sys.path).
+        if (root / "hr_tools" / "employee_service.py").is_file() or (
             root / "hr_tools"
-        ).exists():
+        ).is_dir():
             root_s = str(root)
             if root_s not in sys.path:
                 sys.path.insert(0, root_s)
@@ -45,11 +47,13 @@ def _load_tool_module() -> Any:
 
         return mod
     except ImportError:
-        # Fallback: load tools/employee_tool.py by path
+        # Fallback: load hr_tools/employee_tool.py by path
         root = Path(os.getenv("HR_APP_ROOT", "/app"))
-        tool_path = root / "tools" / "employee_tool.py"
+        tool_path = root / "hr_tools" / "employee_tool.py"
         if not tool_path.is_file():
-            tool_path = Path(__file__).resolve().parents[2] / "tools" / "employee_tool.py"
+            tool_path = (
+                Path(__file__).resolve().parents[2] / "hr_tools" / "employee_tool.py"
+            )
         import importlib.util
 
         spec = importlib.util.spec_from_file_location(

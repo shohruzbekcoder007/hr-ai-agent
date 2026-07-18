@@ -89,7 +89,7 @@ project/
 ├── install.md              # Step-by-step production install guide
 ├── README.md               # This file
 ├── requirements.txt        # App Python deps (Hermes installed in Docker)
-├── pyproject.toml          # Package metadata (import name hr_tools → tools/)
+├── pyproject.toml          # Package metadata (package hr_tools)
 ├── data/
 │   └── employees.json      # Sole knowledge base (25 sample employees)
 ├── config/
@@ -100,7 +100,7 @@ project/
 │   └── system_prompt.md    # Professional HR system prompt
 ├── agents/
 │   └── hr_agent.py         # Hermes AIAgent façade (one specialist)
-├── tools/                  # Filesystem path for HR tools
+├── hr_tools/               # HR tools package (not named tools/ — avoids shadowing Hermes)
 │   ├── employee_service.py # JSON load + query engine
 │   └── employee_tool.py    # Hermes tool schemas + handlers
 ├── plugins/
@@ -117,10 +117,9 @@ project/
     └── healthcheck.sh      # Docker HEALTHCHECK
 ```
 
-> **Import note:** Hermes already owns the top-level Python package name `tools`.
-> Our implementations live in the `tools/` **directory** but are installed as the
-> package **`hr_tools`** (`pyproject.toml` package-dir mapping). This is intentional
-> and required for correct coexistence with Hermes.
+> **Import note:** Hermes already owns the top-level Python package name `tools`
+> (`tools.registry`, etc.). Our HR code lives in the **`hr_tools/`** package
+> directory so a local source checkout on `sys.path` cannot shadow Hermes.
 
 ---
 

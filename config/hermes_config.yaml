@@ -7,7 +7,10 @@ _config_version: 21
 
 model:
   # Overridden at runtime by HR_MODEL / provider env vars when set.
+  # For direct OpenAI set OPENAI_API_KEY + HR_MODEL=gpt-4o-mini (see .env.example).
+  # Library embedding also passes api_key + base_url from agents/hr_agent.py.
   default: ""
+  # provider is left empty; hr_agent resolves OpenAI/OpenRouter/Anthropic from env.
 
 agent:
   max_iterations: 20

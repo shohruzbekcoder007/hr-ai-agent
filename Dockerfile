@@ -41,7 +41,7 @@ RUN git clone --depth 1 --branch "${HERMES_REF}" "${HERMES_REPO}" /opt/hermes-ag
 COPY requirements.txt pyproject.toml README.md ./
 COPY agents ./agents
 COPY app ./app
-COPY tools ./tools
+COPY hr_tools ./hr_tools
 COPY plugins ./plugins
 COPY prompts ./prompts
 COPY data ./data
@@ -94,7 +94,7 @@ WORKDIR /app
 # Application payload
 COPY --chown=hermes:hermes agents ./agents
 COPY --chown=hermes:hermes app ./app
-COPY --chown=hermes:hermes tools ./tools
+COPY --chown=hermes:hermes hr_tools ./hr_tools
 COPY --chown=hermes:hermes plugins ./plugins
 COPY --chown=hermes:hermes prompts ./prompts
 COPY --chown=hermes:hermes data ./data

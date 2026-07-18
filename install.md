@@ -228,7 +228,7 @@ scp -r ./hr-ai-agent ubuntu@192.168.1.50:/opt/
 ```bash
 cd /opt/hr-ai-agent
 ls -la
-# Dockerfile  docker-compose.yml  .env.example  data/  agents/  tools/  ...
+# Dockerfile  docker-compose.yml  .env.example  data/  agents/  hr_tools/  ...
 ```
 
 ---

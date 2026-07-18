@@ -1,8 +1,8 @@
 """
-HR tool package (filesystem path: tools/).
+HR tool package (filesystem path: hr_tools/).
 
-Imported as ``hr_tools`` via pyproject package-dir mapping so we do not
-shadow Hermes Agent's own top-level ``tools`` package.
+Named ``hr_tools`` (not ``tools``) so we never shadow Hermes Agent's
+top-level ``tools`` package (``tools.registry``, etc.).
 """
 
 from .employee_service import EmployeeService, get_employee_service

@@ -545,9 +545,8 @@ def register_hr_tools() -> list[str]:
     (re-registration overwrites). Falls back gracefully if Hermes is absent.
     """
     try:
-        # Hermes ships a top-level package named ``tools``. Our filesystem
-        # directory is also ``tools/`` but is installed as ``hr_tools`` so this
-        # import resolves to Hermes, not our package.
+        # Hermes ships a top-level package named ``tools``. Our package is
+        # ``hr_tools/`` so this import resolves to Hermes, not our code.
         from tools.registry import registry  # type: ignore[import-not-found]
     except Exception:
         logger.warning(
