@@ -3,34 +3,34 @@
 
 agent:
   name: hr-ai-agent
-  domain: human_resources
+  domain: human_resources_sql
   description: >
-    Specialized HR assistant that answers employee-related questions
-    exclusively from the local employees.json knowledge base.
+    PostgreSQL SQL agent that answers workforce questions exclusively
+    via read-only SQL tools (list_tables, describe_table, run_sql).
 
   model: ${HR_MODEL:-anthropic/claude-sonnet-4.6}
-  max_iterations: 20
+  max_iterations: 30
   quiet_mode: true
   skip_memory: true
   skip_context_files: true
   enabled_toolsets:
-    - hr
+    - sql
 
   system_prompt_path: ${SYSTEM_PROMPT_PATH:-/app/prompts/system_prompt.md}
-  employees_json_path: ${EMPLOYEES_JSON_PATH:-/app/data/employees.json}
+  database_url_env: DATABASE_URL
 
   response:
     default_format: natural_language
     allow_json: true
     allow_markdown_table: true
-    refuse_out_of_domain: true
+    refuse_out_of_domain: false
     never_hallucinate: true
-    no_data_message: "No data found"
+    no_data_message: "No matching data exists"
 
-  privacy:
-    # Salary and personal contact data are available via tools;
-    # the system prompt instructs careful handling.
-    mask_salary_by_default: false
+  sql:
+    read_only: true
+    max_rows: 200
+    statement_timeout_ms: 30000
 
 api:
   host: ${APP_HOST:-0.0.0.0}

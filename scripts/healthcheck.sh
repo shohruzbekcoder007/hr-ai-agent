@@ -34,7 +34,7 @@ if ! http_get "$URL" >/dev/null; then
   exit 1
 fi
 
-# 2) Readiness (agent + employees.json)
+# 2) Readiness (agent + PostgreSQL)
 if [[ "$CHECK_READY" == "1" ]]; then
   if ! http_get "$READY_URL" >/dev/null; then
     echo "healthcheck: readiness failed for $READY_URL" >&2

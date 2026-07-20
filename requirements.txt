@@ -23,6 +23,9 @@ python-json-logger>=2.0.7,<4.0.0
 # Typing (stdlib-first; keep for older tooling)
 typing-extensions>=4.12.0,<5.0.0
 
+# PostgreSQL (SQL agent knowledge source)
+psycopg[binary,pool]>=3.2.0,<4.0.0
+
 # ---------------------------------------------------------------------------
 # Hermes Agent Framework (installed in Docker build from GitHub)
 # Uncomment for local non-Docker development if you prefer pip over Dockerfile:

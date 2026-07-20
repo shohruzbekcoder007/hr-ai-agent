@@ -25,7 +25,7 @@ No desktop environment. No GUI. Commands are for a standard Ubuntu Server 24.04 
 13. [Restart / stop / start](#13-restart--stop--start)
 14. [Update Hermes](#14-update-hermes)
 15. [Update the HR Agent application](#15-update-the-hr-agent-application)
-16. [Update employees.json](#16-update-employeesjson)
+16. [Configure PostgreSQL (DATABASE_URL)](#16-configure-postgresql-database_url)
 17. [Backup](#17-backup)
 18. [Restore](#18-restore)
 19. [Firewall and reverse proxy (optional)](#19-firewall-and-reverse-proxy-optional)
@@ -524,38 +524,42 @@ docker compose restart hr-agent
 
 ---
 
-## 16. Update employees.json
+## 16. Configure PostgreSQL (DATABASE_URL)
 
-### 16.1 Edit on the host
+Knowledge source is **PostgreSQL only** (no `employees.json`).
+
+### 16.1 Set connection in `.env`
 
 ```bash
 cd /opt/hr-ai-agent
-cp data/employees.json data/employees.json.bak.$(date +%Y%m%d%H%M%S)
-nano data/employees.json
-# validate JSON
-python3 -m json.tool data/employees.json > /dev/null && echo OK
+nano .env
 ```
 
-### 16.2 Hot-reload without full restart
+```env
+DATABASE_URL=postgresql://readonly_user:password@db-host:5432/tuzilma
+HR_ENABLED_TOOLSETS=sql
+```
+
+Prefer a **read-only** DB role. Then:
 
 ```bash
-curl -sS http://127.0.0.1:8080/v1/tools/reload_employees \
+docker compose up -d --force-recreate hr-agent
+curl -sS http://127.0.0.1:8080/ready | jq .
+```
+
+### 16.2 Probe tables / SQL tools
+
+```bash
+curl -sS http://127.0.0.1:8080/v1/tools/list_tables \
   -H 'Content-Type: application/json' \
   -d '{"arguments":{}}' | jq .
+
+curl -sS http://127.0.0.1:8080/v1/tools/run_sql \
+  -H 'Content-Type: application/json' \
+  -d '{"arguments":{"sql":"SELECT count(*) AS n FROM employees"}}' | jq .
 ```
 
-Or restart:
-
-```bash
-docker compose restart hr-agent
-```
-
-### 16.3 Schema rules
-
-- Root object with `"employees": [ {...}, ... ]` **or** a bare array of employee objects
-- Each employee **must** have unique `employee_id`
-- `manager` is an `employee_id` string or `null`
-- `skills` / `languages` are arrays of strings
+Data changes live in the database — restart is not required for new rows.
 
 ---
 
@@ -565,7 +569,7 @@ docker compose restart hr-agent
 
 | Path / volume | Contents |
 |---------------|----------|
-| `./data/employees.json` | Knowledge base |
+| PostgreSQL (`tuzilma` / your DB) | Knowledge base (DB-side backup) |
 | `./.env` | Secrets (encrypt at rest!) |
 | `./prompts/` | System prompt |
 | `./config/` | Hermes / agent config |
@@ -699,7 +703,7 @@ docker compose ps -a
 docker compose logs hr-agent
 ```
 
-Common causes: missing `employees.json`, bad permissions on mounts, invalid `.env` quoting.
+Common causes: missing/invalid `DATABASE_URL`, bad permissions on mounts, invalid `.env` quoting.
 
 ### Healthcheck unhealthy
 
@@ -723,9 +727,9 @@ docker exec hr-ai-agent sh -c 'env | grep -E "API_KEY|HR_MODEL|OPENAI_BASE" | se
 
 ```bash
 docker exec hr-ai-agent python - <<'PY'
-from hr_tools.employee_service import get_employee_service
-print(get_employee_service().readiness())
-print(get_employee_service().count_employees())
+from hr_tools.db_service import get_database_service
+print(get_database_service().readiness())
+print([t["table_name"] for t in get_database_service().list_tables()][:20])
 PY
 ```
 
@@ -751,16 +755,16 @@ docker image prune -f
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| `employees.json not found` | Missing mount or wrong path | Ensure `./data/employees.json` exists; check `EMPLOYEES_JSON_PATH` |
+| `DATABASE_URL` / connection error | Bad host, user, password, firewall | Fix `.env`; test from host with `psql` |
 | `401 Unauthorized` | Bearer token required | Pass `Authorization: Bearer …` or clear `API_BEARER_TOKEN` |
-| `503` on `/ready` | Agent failed init | Check logs; validate JSON; ensure Hermes import works |
-| `No data found` | Valid empty search | Expected when no matches; verify query filters |
+| `503` on `/ready` | Agent or DB not ready | Check logs; verify `DATABASE_URL`; ensure Hermes import works |
+| No matching data | Valid empty query result | Expected when no rows; fix SQL / filters |
 | LLM auth error | Bad/missing API key | Fix `.env`, `docker compose up -d --force-recreate` |
 | Port already allocated | Host 8080 in use | Change `APP_PORT` in `.env` (maps host:container) |
-| Permission denied on logs | Host dir owned by root | `sudo chown -R $USER:$USER logs data` |
+| Permission denied on logs | Host dir owned by root | `sudo chown -R $USER:$USER logs` |
 | `import run_agent` fails | Hermes not in image | Rebuild image; check Dockerfile build logs |
-| Plugin tools not called | Wrong toolsets | Ensure `HR_ENABLED_TOOLSETS=hr` and plugin installed under `HERMES_HOME` |
-| JSON decode error on employees | Invalid JSON | `python3 -m json.tool data/employees.json` |
+| Plugin tools not called | Wrong toolsets | Ensure `HR_ENABLED_TOOLSETS=sql` and plugin under `HERMES_HOME` |
+| `Only read-only SELECT` | Mutating SQL blocked | Use SELECT/WITH only |
 | Slow first response | Cold model / network | Normal; check outbound latency to provider |
 
 ---
@@ -769,15 +773,15 @@ docker image prune -f
 
 ### Is a database required?
 
-No. Only `employees.json`.
+**Yes.** PostgreSQL via `DATABASE_URL` is the only knowledge source.
 
 ### Is RAG / Chroma / vector DB used?
 
-No. Queries are deterministic filters over the in-memory JSON directory.
+No. The agent inspects schema and runs read-only SQL through Hermes tools.
 
 ### Can I run multiple HR agents?
 
-This design is **one container → one specialized HR agent**. Scale by placing a reverse proxy in front or running more Compose stacks with separate data files.
+This design is **one container → one specialized SQL agent**. Scale with a reverse proxy or more Compose stacks (separate DB / env).
 
 ### Does this use Hermes Desktop / TUI?
 
@@ -785,7 +789,7 @@ No. Desktop and TUI are disabled (`HERMES_TUI=0`, `HERMES_SKIP_DESKTOP=1`). Inte
 
 ### How do I add more employees?
 
-Edit `data/employees.json`, validate JSON, call `reload_employees` or restart.
+Insert/update rows in PostgreSQL (outside this agent; agent is read-only).
 
 ### How do I change the system prompt?
 

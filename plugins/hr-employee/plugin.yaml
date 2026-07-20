@@ -1,6 +1,6 @@
 name: hr-employee
-version: "1.0.0"
+version: "2.0.0"
 description: >
-  HR employee directory tools backed by employees.json.
-  Extends Hermes with search, department, salary, and statistics tools
-  without modifying Hermes core.
+  PostgreSQL SQL Agent tools for Hermes (toolset=sql).
+  Provides list_tables, describe_table, run_sql (read-only).
+  Does not modify Hermes core.

@@ -20,7 +20,7 @@ Arxitektura va API: **[README.md](README.md)**
 9. [Agent bilan suhbat](#9-agent-bilan-suhbat)
 10. [Loglar](#10-loglar)
 11. [To‘xtatish / qayta ishga tushirish](#11-toxtatish--qayta-ishga-tushirish)
-12. [employees.json ni o‘zgartirish](#12-employeesjson-ni-ozgartirish)
+12. [PostgreSQL (DATABASE_URL) sozlash](#12-postgresql-database_url-sozlash)
 13. [Ollama (lokal model, ixtiyoriy)](#13-ollama-lokal-model-ixtiyoriy)
 14. [Docker’siz qisman test (ixtiyoriy)](#14-dockersiz-qisman-test-ixtiyoriy)
 15. [Muammolarni tuzatish](#15-muammolarni-tuzatish)
@@ -41,8 +41,8 @@ Sizning kompyuter
       ▼
  Bitta container: hr-ai-agent
       ├─ Hermes
-      ├─ HR Agent
-      ├─ employees.json
+      ├─ SQL Agent (toolset=sql)
+      ├─ PostgreSQL (DATABASE_URL)
       └─ API → http://127.0.0.1:8080
 ```
 
@@ -129,9 +129,9 @@ Papka ichida bo‘lishi kerak:
 Dockerfile
 docker-compose.yml
 .env.example
-data\employees.json
 agents\
-tools\
+hr_tools\
+prompts\
 ...
 ```
 
@@ -248,8 +248,8 @@ CORS_ORIGINS=*
 API_BEARER_TOKEN=
 ```
 
-> Container ichidagi yo‘llar (`EMPLOYEES_JSON_PATH=/app/data/...`) ni o‘zgartirmang — ular image uchun.  
-> Hostdagi fayllar `docker-compose.yml` volume orqali ulanadi (`./data`, `./logs`, `./prompts`).
+> Container ichidagi yo‘llar (`SYSTEM_PROMPT_PATH=/app/prompts/...`) ni o‘zgartirmang — ular image uchun.  
+> Hostdagi fayllar `docker-compose.yml` volume orqali ulanadi (`./logs`, `./prompts`, `./config`).
 
 ---
 
@@ -472,37 +472,27 @@ docker compose restart
 
 ---
 
-## 12. employees.json ni o‘zgartirish
+## 12. PostgreSQL (DATABASE_URL) sozlash
 
-Hostda tahrirlang:
+Bilim manbai **faqat PostgreSQL**. `employees.json` yo‘q.
 
-```text
-data/employees.json
+`.env` da:
+
+```env
+DATABASE_URL=postgresql://readonly_user:password@host:5432/tuzilma
+HR_ENABLED_TOOLSETS=sql
 ```
 
-JSON ni tekshirish:
+Tekshirish:
 
 ```bash
-# Python bor bo‘lsa
-python -m json.tool data/employees.json > NUL     # Windows
-python3 -m json.tool data/employees.json > /dev/null  # Linux/macOS
-```
-
-Hot-reload (container ishlab tursa):
-
-```bash
-curl -sS http://127.0.0.1:8080/v1/tools/reload_employees \
-  -H "Content-Type: application/json" \
+curl -sS http://127.0.0.1:8080/ready
+curl -sS http://127.0.0.1:8080/v1/tools/list_tables ^
+  -H "Content-Type: application/json" ^
   -d "{\"arguments\":{}}"
 ```
 
-Yoki:
-
-```bash
-docker compose restart
-```
-
-Bilim manbai faqat shu JSON — DB yo‘q.
+Ma’lumot DB da o‘zgaradi; agent faqat **SELECT** qiladi.
 
 ---
 
@@ -557,22 +547,18 @@ curl -sS http://127.0.0.1:8080/v1/chat \
 ## 14. Docker’siz qisman test (ixtiyoriy)
 
 To‘liq agent (Hermes + chat) uchun Docker tavsiya etiladi.  
-Faqat **employees.json / service** ni tekshirish:
+SQL guard ni DB siz tekshirish:
 
 ```bash
 # Loyiha ildizidan
-python scripts/validate_data.py
+python scripts/validate_sql_guard.py
 ```
 
-Kutilgan:
+DB ulanishi:
 
-```text
-OK — employees: 25
-OK — departments: 8
-...
+```bash
+python -c "from dotenv import load_dotenv; load_dotenv(); from hr_tools.db_service import get_database_service; print(get_database_service().readiness())"
 ```
-
-Bu LLM va Docker talab qilmaydi.
 
 Hermes’ni hostga to‘g‘ridan-to‘g‘ri o‘rnatish mumkin, lekin Windows da qiyinroq; local dev uchun **Docker Desktop** eng barqaror yo‘l.
 
@@ -619,8 +605,8 @@ docker compose up -d
 docker compose logs --tail=200 hr-agent
 ```
 
-- `employees.json` bormi: `data\employees.json`  
-- Volume ruxsatlari  
+- `.env` da `DATABASE_URL` to‘g‘rimi?  
+- DB host ga tarmoq ochiqmi (`172.x` / firewall)?  
 - Container to‘liq start bo‘lganini kuting (birinchi start 30–60 s)
 
 ### Chat xato, tool ishlaydi
@@ -715,9 +701,9 @@ curl -sS http://127.0.0.1:8080/v1/chat \
 ## Xulosa
 
 1. Docker Desktop (yoki Engine) o‘rnating.  
-2. `.env` yarating va LLM kalitini yozing.  
+2. `.env` yarating: LLM kalit + `DATABASE_URL` + `HR_ENABLED_TOOLSETS=sql`.  
 3. `docker compose build && docker compose up -d`.  
 4. http://127.0.0.1:8080/docs orqali suhbatlashing.  
-5. Bilim faqat `data/employees.json` da — uni tahrirlab reload qiling.
+5. Bilim faqat PostgreSQL da — agent read-only SQL tools orqali o‘qiydi.
 
 Savol qolsa: avval `docker compose logs -f hr-agent` ni oching — deyarli barcha local muammolar shu yerda ko‘rinadi.

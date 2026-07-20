@@ -49,11 +49,19 @@ def main() -> None:
     }
 
     logger.info("=" * 60)
-    logger.info("HR AI Agent — production server starting")
+    logger.info("SQL Agent — production server starting")
     logger.info("Host=%s Port=%s Workers=%s Reload=%s", host, port, workers, reload)
     logger.info("HERMES_HOME=%s", os.getenv("HERMES_HOME", ""))
-    logger.info("EMPLOYEES_JSON_PATH=%s", os.getenv("EMPLOYEES_JSON_PATH", ""))
+    logger.info(
+        "DATABASE_URL configured=%s",
+        bool(
+            os.getenv("DATABASE_URL")
+            or os.getenv("HR_DATABASE_URL")
+            or os.getenv("POSTGRES_URL")
+        ),
+    )
     logger.info("HR_MODEL=%s", os.getenv("HR_MODEL", ""))
+    logger.info("HR_ENABLED_TOOLSETS=%s", os.getenv("HR_ENABLED_TOOLSETS", "sql"))
     logger.info("=" * 60)
 
     # Eager init so healthcheck becomes ready only after load

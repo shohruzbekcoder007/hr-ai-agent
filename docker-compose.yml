@@ -36,14 +36,18 @@ services:
       HERMES_TUI: "0"
       HERMES_SKIP_DESKTOP: "1"
       HR_APP_ROOT: /app
-      EMPLOYEES_JSON_PATH: /app/data/employees.json
       SYSTEM_PROMPT_PATH: /app/prompts/system_prompt.md
+      # PostgreSQL (set in .env) — readonly role recommended
+      DATABASE_URL: ${DATABASE_URL:-}
+      HR_REQUIRE_DB: ${HR_REQUIRE_DB:-false}
+      DB_MAX_ROWS: ${DB_MAX_ROWS:-200}
+      DB_STATEMENT_TIMEOUT_MS: ${DB_STATEMENT_TIMEOUT_MS:-30000}
       HR_MODEL: ${HR_MODEL:-anthropic/claude-sonnet-4.6}
       HR_MAX_ITERATIONS: ${HR_MAX_ITERATIONS:-20}
       HR_QUIET_MODE: ${HR_QUIET_MODE:-true}
       HR_SKIP_MEMORY: ${HR_SKIP_MEMORY:-true}
       HR_SKIP_CONTEXT_FILES: ${HR_SKIP_CONTEXT_FILES:-true}
-      HR_ENABLED_TOOLSETS: ${HR_ENABLED_TOOLSETS:-hr}
+      HR_ENABLED_TOOLSETS: ${HR_ENABLED_TOOLSETS:-sql}
       HR_SESSION_HISTORY_LIMIT: ${HR_SESSION_HISTORY_LIMIT:-20}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
@@ -57,8 +61,6 @@ services:
       - "${APP_PORT:-8080}:8080"
 
     volumes:
-      # Mutable employee directory (hot-reload supported via reload_employees tool)
-      - ./data:/app/data:rw
       # Persistent application logs
       - ./logs:/app/logs:rw
       # Optional: override system prompt without rebuild

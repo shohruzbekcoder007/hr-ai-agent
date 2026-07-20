@@ -13,7 +13,7 @@ model:
   # provider is left empty; hr_agent resolves OpenAI/OpenRouter/Anthropic from env.
 
 agent:
-  max_iterations: 20
+  max_iterations: 30
 
 terminal:
   backend: local
@@ -35,7 +35,7 @@ plugins:
 tools:
   cli:
     enabled:
-      - hr
+      - sql
     disabled:
       - terminal
       - browser
@@ -45,6 +45,7 @@ tools:
       - cronjob
       - image_gen
       - vision
+      - hr
 
 logging:
   level: INFO

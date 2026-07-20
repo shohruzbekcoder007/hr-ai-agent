@@ -54,7 +54,7 @@ loggers:
     level: INFO
     handlers: [console, file, error_file]
     propagate: false
-  employee_tool:
+  sql_tool:
     level: INFO
     handlers: [console, file, error_file]
     propagate: false

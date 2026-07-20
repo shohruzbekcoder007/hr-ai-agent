@@ -44,7 +44,6 @@ COPY app ./app
 COPY hr_tools ./hr_tools
 COPY plugins ./plugins
 COPY prompts ./prompts
-COPY data ./data
 COPY config ./config
 COPY scripts ./scripts
 
@@ -68,8 +67,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     HERMES_ENABLE_PROJECT_PLUGINS=true \
     HERMES_TUI=0 \
     HERMES_SKIP_DESKTOP=1 \
-    EMPLOYEES_JSON_PATH=/app/data/employees.json \
     SYSTEM_PROMPT_PATH=/app/prompts/system_prompt.md \
+    HR_ENABLED_TOOLSETS=sql \
     LOG_DIR=/app/logs \
     APP_HOST=0.0.0.0 \
     APP_PORT=8080 \
@@ -97,17 +96,15 @@ COPY --chown=hermes:hermes app ./app
 COPY --chown=hermes:hermes hr_tools ./hr_tools
 COPY --chown=hermes:hermes plugins ./plugins
 COPY --chown=hermes:hermes prompts ./prompts
-COPY --chown=hermes:hermes data ./data
 COPY --chown=hermes:hermes config ./config
 COPY --chown=hermes:hermes scripts ./scripts
 COPY --chown=hermes:hermes requirements.txt pyproject.toml README.md ./
 
-# Hermes home: config + HR plugin (proper extension, no core rewrite)
+# Hermes home: config + SQL plugin (proper extension, no core rewrite)
 RUN mkdir -p \
         /home/hermes/.hermes/plugins \
         /home/hermes/.hermes/logs \
         /app/logs \
-        /app/data \
     && cp -a /app/plugins/hr-employee /home/hermes/.hermes/plugins/hr-employee \
     && cp /app/config/hermes_config.yaml /home/hermes/.hermes/config.yaml \
     && chown -R hermes:hermes /home/hermes /app/logs

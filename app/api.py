@@ -1,11 +1,11 @@
 """
-FastAPI HTTP surface for the production HR AI Agent.
+FastAPI HTTP surface for the production SQL / HR AI Agent.
 
 Endpoints:
   GET  /health          — liveness
-  GET  /ready           — readiness (employees loaded + agent init)
+  GET  /ready           — readiness (DB connected + agent init)
   GET  /v1/info         — service metadata
-  POST /v1/chat         — HR chat (Hermes AIAgent)
+  POST /v1/chat         — SQL agent chat (Hermes AIAgent + SQL tools)
   POST /v1/tools/{name} — direct tool invocation (debug / automation)
 """
 
@@ -26,7 +26,7 @@ logger = logging.getLogger("hr_agent")
 
 
 class ChatRequest(BaseModel):
-    message: str = Field(..., min_length=1, description="User HR question")
+    message: str = Field(..., min_length=1, description="User question for the SQL agent")
     session_id: Optional[str] = Field(
         default=None,
         description="Optional multi-turn session id",
@@ -42,7 +42,10 @@ class ChatResponse(BaseModel):
     response: Optional[str] = None
     session_id: Optional[str] = None
     error: Optional[str] = None
-    employee_count: Optional[int] = None
+    db_ready: Optional[bool] = None
+    # Dynamic tool trail (Langflow-style: variable length/order per question)
+    tools_called: Optional[list[dict[str, Any]]] = None
+    tool_call_count: Optional[int] = None
 
 
 class ToolRequest(BaseModel):
@@ -83,8 +86,8 @@ def create_app() -> FastAPI:
         title=os.getenv("APP_NAME", "hr-ai-agent"),
         version=__version__,
         description=(
-            "Production HR AI Agent powered by Nous Research Hermes Agent Framework. "
-            "Knowledge source: employees.json only."
+            "Production SQL Agent powered by Nous Research Hermes Agent Framework. "
+            "Knowledge source: PostgreSQL via read-only SQL tools."
         ),
         docs_url="/docs",
         redoc_url="/redoc",
@@ -102,9 +105,12 @@ def create_app() -> FastAPI:
     def _startup() -> None:
         from agents.hr_agent import get_hr_agent
 
-        logger.info("Starting HR AI Agent API v%s", __version__)
-        agent = get_hr_agent()
-        logger.info("HR Agent readiness: %s", agent.readiness())
+        logger.info("Starting SQL Agent API v%s", __version__)
+        try:
+            agent = get_hr_agent()
+            logger.info("SQL Agent readiness: %s", agent.readiness())
+        except Exception:
+            logger.exception("Agent init on startup failed — /ready may return 503")
 
     @app.get("/health")
     def health() -> dict[str, Any]:
@@ -113,16 +119,16 @@ def create_app() -> FastAPI:
 
     @app.get("/ready")
     def ready() -> dict[str, Any]:
-        """Readiness probe — employees loaded and agent initialized."""
+        """Readiness probe — DB connected and agent initialized."""
         from agents.hr_agent import get_hr_agent
-        from hr_tools.employee_service import get_employee_service
+        from hr_tools.db_service import get_database_service
 
         agent = get_hr_agent()
-        emp = get_employee_service().readiness()
+        db = get_database_service().readiness()
         payload = {
-            "status": "ready" if agent.ready and emp.get("ready") else "not_ready",
+            "status": "ready" if agent.ready and db.get("ready") else "not_ready",
             "agent": agent.readiness(),
-            "employees": emp,
+            "database": db,
         }
         if payload["status"] != "ready":
             raise HTTPException(status_code=503, detail=payload)
@@ -131,17 +137,23 @@ def create_app() -> FastAPI:
     @app.get("/v1/info")
     def info() -> dict[str, Any]:
         from agents.hr_agent import get_hr_agent
-        from hr_tools.employee_service import get_employee_service
+        from hr_tools.db_service import get_database_service
 
         agent = get_hr_agent()
-        emp = get_employee_service().readiness()
+        db = get_database_service().readiness()
         return {
             "service": os.getenv("APP_NAME", "hr-ai-agent"),
             "version": __version__,
             "framework": "hermes-agent (Nous Research)",
-            "knowledge_source": emp.get("json_path"),
-            "employee_count": emp.get("employee_count"),
-            "organization": emp.get("organization"),
+            "agent_type": "postgresql-sql-agent",
+            "knowledge_source": "postgresql",
+            "database": {
+                "ready": db.get("ready"),
+                "url_configured": db.get("database_url_configured"),
+                "url_redacted": db.get("database_url_redacted"),
+                "server_version": db.get("server_version"),
+            },
+            "toolsets": os.getenv("HR_ENABLED_TOOLSETS", "sql"),
             "model": agent.readiness().get("model"),
             "ready": agent.ready,
         }
@@ -159,7 +171,7 @@ def create_app() -> FastAPI:
             session_id=body.session_id,
             reset_session=body.reset_session,
         )
-        return ChatResponse(**result)
+        return ChatResponse(**{k: result.get(k) for k in ChatResponse.model_fields})
 
     @app.post("/v1/tools/{tool_name}")
     def invoke_tool(
@@ -173,7 +185,7 @@ def create_app() -> FastAPI:
         """
         import json
 
-        from hr_tools.employee_tool import get_tool_handlers
+        from hr_tools.sql_tool import get_tool_handlers
 
         handlers = get_tool_handlers()
         handler = handlers.get(tool_name)
