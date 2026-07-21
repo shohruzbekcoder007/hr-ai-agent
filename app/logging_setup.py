@@ -1,4 +1,4 @@
-"""Structured logging setup with rotation for the HR AI Agent service."""
+"""Structured logging setup with rotation."""
 
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ def setup_logging() -> None:
     root.addHandler(console)
 
     file_handler = RotatingFileHandler(
-        log_dir / "hr-agent.log",
+        log_dir / "app.log",
         maxBytes=max_bytes,
         backupCount=backup_count,
         encoding="utf-8",
@@ -74,7 +74,7 @@ def setup_logging() -> None:
     root.addHandler(file_handler)
 
     err_handler = RotatingFileHandler(
-        log_dir / "hr-agent-errors.log",
+        log_dir / "app-errors.log",
         maxBytes=max_bytes,
         backupCount=backup_count,
         encoding="utf-8",
@@ -83,12 +83,11 @@ def setup_logging() -> None:
     err_handler.setFormatter(formatter)
     root.addHandler(err_handler)
 
-    # Quiet noisy libraries slightly
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("uvicorn.access").setLevel(logging.INFO)
 
-    logging.getLogger("hr_agent").info(
+    logging.getLogger("app").info(
         "Logging initialized level=%s dir=%s format=%s",
         level_name,
         log_dir,

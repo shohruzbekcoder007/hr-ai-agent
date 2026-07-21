@@ -1,6 +1,0 @@
-name: hr-employee
-version: "2.0.0"
-description: >
-  PostgreSQL SQL Agent tools for Hermes (toolset=sql).
-  Provides list_tables, describe_table, run_sql (read-only).
-  Does not modify Hermes core.

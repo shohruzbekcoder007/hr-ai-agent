@@ -1,5 +1,11 @@
-"""Agent package for the specialized HR AI Agent."""
+"""Agent package — LangChain-style agents + orchestrator for Open WebUI."""
 
-from .hr_agent import HRAgent, create_hr_agent
+from agents.orchestrator import AgentOrchestrator, get_orchestrator
+from agents.sql_agent import SQLAgentService, get_sql_agent
 
-__all__ = ["HRAgent", "create_hr_agent"]
+__all__ = [
+    "AgentOrchestrator",
+    "get_orchestrator",
+    "SQLAgentService",
+    "get_sql_agent",
+]

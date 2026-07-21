@@ -1,27 +1,23 @@
 # =============================================================================
-# HR AI Agent — Production Docker Compose
-# Single service: Hermes + specialized HR Agent (no GUI / no desktop)
+# LangChain SQLAgent service (Langflow-compatible)
 # =============================================================================
 
-name: hr-ai-agent
+name: ai-agents
 
 services:
-  hr-agent:
+  app:
     build:
       context: .
       dockerfile: Dockerfile
-      args:
-        HERMES_REPO: https://github.com/NousResearch/hermes-agent.git
-        HERMES_REF: main
-    image: hr-ai-agent:1.0.0
-    container_name: hr-ai-agent
+    image: ai-agents:0.3.0
+    container_name: ai-agents
     restart: unless-stopped
 
     env_file:
       - .env
 
     environment:
-      APP_NAME: ${APP_NAME:-hr-ai-agent}
+      APP_NAME: ${APP_NAME:-ai-agents}
       APP_ENV: ${APP_ENV:-production}
       APP_HOST: 0.0.0.0
       APP_PORT: 8080
@@ -29,31 +25,17 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_DIR: /app/logs
       LOG_FORMAT: ${LOG_FORMAT:-json}
-      LOG_MAX_BYTES: ${LOG_MAX_BYTES:-10485760}
-      LOG_BACKUP_COUNT: ${LOG_BACKUP_COUNT:-10}
-      HERMES_HOME: /home/hermes/.hermes
-      HERMES_ENABLE_PROJECT_PLUGINS: "true"
-      HERMES_TUI: "0"
-      HERMES_SKIP_DESKTOP: "1"
-      HR_APP_ROOT: /app
-      SYSTEM_PROMPT_PATH: /app/prompts/system_prompt.md
-      # PostgreSQL (set in .env) — readonly role recommended
-      DATABASE_URL: ${DATABASE_URL:-}
-      HR_REQUIRE_DB: ${HR_REQUIRE_DB:-false}
-      DB_MAX_ROWS: ${DB_MAX_ROWS:-200}
-      DB_STATEMENT_TIMEOUT_MS: ${DB_STATEMENT_TIMEOUT_MS:-30000}
-      HR_MODEL: ${HR_MODEL:-anthropic/claude-sonnet-4.6}
-      HR_MAX_ITERATIONS: ${HR_MAX_ITERATIONS:-20}
-      HR_QUIET_MODE: ${HR_QUIET_MODE:-true}
-      HR_SKIP_MEMORY: ${HR_SKIP_MEMORY:-true}
-      HR_SKIP_CONTEXT_FILES: ${HR_SKIP_CONTEXT_FILES:-true}
-      HR_ENABLED_TOOLSETS: ${HR_ENABLED_TOOLSETS:-sql}
-      HR_SESSION_HISTORY_LIMIT: ${HR_SESSION_HISTORY_LIMIT:-20}
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
-      API_BEARER_TOKEN: ${API_BEARER_TOKEN:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      LLM_MODEL: ${LLM_MODEL:-gpt-4.1}
+      DATABASE_URL: ${DATABASE_URL:-}
+      SQL_AGENT_MAX_ITERATIONS: ${SQL_AGENT_MAX_ITERATIONS:-15}
+      SQL_AGENT_MAX_RETRIES: ${SQL_AGENT_MAX_RETRIES:-3}
+      SQL_AGENT_VERBOSE: ${SQL_AGENT_VERBOSE:-true}
+      SQL_AGENT_HANDLE_PARSING_ERRORS: ${SQL_AGENT_HANDLE_PARSING_ERRORS:-true}
+      SYSTEM_PROMPT_PATH: /app/prompts/sql_agent_system.md
+      AGENT_ORCHESTRATION_MODE: ${AGENT_ORCHESTRATION_MODE:-sql_only}
+      AGENT_EXTRA_ENABLED: ${AGENT_EXTRA_ENABLED:-false}
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
       HEALTHCHECK_URL: http://127.0.0.1:8080/health
 
@@ -61,17 +43,9 @@ services:
       - "${APP_PORT:-8080}:8080"
 
     volumes:
-      # Persistent application logs
       - ./logs:/app/logs:rw
-      # Optional: override system prompt without rebuild
-      - ./prompts:/app/prompts:ro
-      # Optional: override agent/hermes config
       - ./config:/app/config:ro
-      # Hermes profile state (sessions, plugin enablement)
-      - hermes_home:/home/hermes/.hermes
-
-    networks:
-      - hr-net
+      - ./prompts:/app/prompts:ro
 
     healthcheck:
       test: ["CMD", "/app/scripts/healthcheck.sh"]
@@ -85,25 +59,10 @@ services:
       options:
         max-size: "20m"
         max-file: "5"
-        tag: "{{.Name}}"
 
     security_opt:
       - no-new-privileges:true
 
-    read_only: false
-    tmpfs:
-      - /tmp:size=64M,mode=1777
-
-    # Resource limits (Compose non-swarm). Tune per VM size.
-    cpus: 2.0
-    mem_limit: 2g
-    mem_reservation: 256m
-
 networks:
-  hr-net:
-    name: hr-ai-agent-net
-    driver: bridge
-
-volumes:
-  hermes_home:
-    name: hr-ai-agent-hermes-home
+  default:
+    name: ai-agents-net

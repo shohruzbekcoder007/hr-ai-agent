@@ -1,3 +1,3 @@
-"""Application package: HTTP API and process entrypoint for the HR AI Agent."""
+"""Application package: HTTP API and process entrypoint."""
 
-__version__ = "1.0.0"
+__version__ = "0.3.0"

@@ -1,64 +1,23 @@
-# Logging configuration for the HR AI Agent service.
-# Applied by app/logging_setup.py (supports JSON or plain text).
-
+# Logging reference (actual setup is app/logging_setup.py + env)
 version: 1
 disable_existing_loggers: false
 
 formatters:
   plain:
-    format: "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
-    datefmt: "%Y-%m-%dT%H:%M:%S%z"
-  json:
-    # Handled by python-json-logger when LOG_FORMAT=json
-    format: "%(asctime)s %(levelname)s %(name)s %(message)s"
+    format: "%(asctime)s %(levelname)s [%(name)s] %(message)s"
 
 handlers:
   console:
     class: logging.StreamHandler
-    level: INFO
     formatter: plain
     stream: ext://sys.stdout
 
-  file:
-    class: logging.handlers.RotatingFileHandler
-    level: INFO
-    formatter: plain
-    filename: /app/logs/hr-agent.log
-    maxBytes: 10485760
-    backupCount: 10
-    encoding: utf-8
-
-  error_file:
-    class: logging.handlers.RotatingFileHandler
-    level: WARNING
-    formatter: plain
-    filename: /app/logs/hr-agent-errors.log
-    maxBytes: 10485760
-    backupCount: 10
-    encoding: utf-8
-
 loggers:
-  uvicorn:
+  app:
     level: INFO
-    handlers: [console, file]
-    propagate: false
-  uvicorn.error:
-    level: INFO
-    handlers: [console, file, error_file]
-    propagate: false
-  uvicorn.access:
-    level: INFO
-    handlers: [console, file]
-    propagate: false
-  hr_agent:
-    level: INFO
-    handlers: [console, file, error_file]
-    propagate: false
-  sql_tool:
-    level: INFO
-    handlers: [console, file, error_file]
+    handlers: [console]
     propagate: false
 
 root:
   level: INFO
-  handlers: [console, file, error_file]
+  handlers: [console]

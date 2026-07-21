@@ -1,12 +1,7 @@
 """
-FastAPI HTTP surface for the production SQL / HR AI Agent.
+FastAPI surface for multi-agent service (Hermes-compatible for Open WebUI gateway).
 
-Endpoints:
-  GET  /health          — liveness
-  GET  /ready           — readiness (DB connected + agent init)
-  GET  /v1/info         — service metadata
-  POST /v1/chat         — SQL agent chat (Hermes AIAgent + SQL tools)
-  POST /v1/tools/{name} — direct tool invocation (debug / automation)
+  Open WebUI → Gateway → POST /v1/chat → Orchestrator → sql_agent [+ extra agents]
 """
 
 from __future__ import annotations
@@ -22,30 +17,44 @@ from pydantic import BaseModel, Field
 
 from app import __version__
 
-logger = logging.getLogger("hr_agent")
+logger = logging.getLogger("app")
 
 
 class ChatRequest(BaseModel):
-    message: str = Field(..., min_length=1, description="User question for the SQL agent")
+    """Hermes-compatible chat body (gateway Open WebUI platform)."""
+
+    message: str = Field(..., min_length=1, description="User question")
     session_id: Optional[str] = Field(
         default=None,
-        description="Optional multi-turn session id",
+        description="Optional multi-turn session id (gateway may send)",
     )
     reset_session: bool = Field(
         default=False,
-        description="Clear prior history for session_id before this turn",
+        description="Hermes-compatible flag; reserved",
     )
 
 
 class ChatResponse(BaseModel):
+    """
+    Hermes-compatible response shape for gateway:
+
+      { "success", "response", "session_id", "error", ... }
+    """
+
     success: bool
     response: Optional[str] = None
     session_id: Optional[str] = None
     error: Optional[str] = None
-    db_ready: Optional[bool] = None
-    # Dynamic tool trail (Langflow-style: variable length/order per question)
+    # Extra diagnostics (gateway may ignore unknown fields)
+    error_code: Optional[str] = None
+    error_detail: Optional[str] = None
+    retryable: Optional[bool] = None
     tools_called: Optional[list[dict[str, Any]]] = None
     tool_call_count: Optional[int] = None
+    agents_used: Optional[list[str]] = None
+    mode: Optional[str] = None
+    # Old Hermes field (always null for SQL agent)
+    employee_count: Optional[int] = None
 
 
 class ToolRequest(BaseModel):
@@ -62,7 +71,6 @@ def _cors_origins() -> list[str]:
 def _check_bearer(
     authorization: Optional[str] = Header(default=None),
 ) -> None:
-    """Optional bearer token gate (API_BEARER_TOKEN)."""
     expected = os.getenv("API_BEARER_TOKEN", "").strip()
     if not expected:
         return
@@ -83,11 +91,11 @@ def _check_bearer(
 
 def create_app() -> FastAPI:
     app = FastAPI(
-        title=os.getenv("APP_NAME", "hr-ai-agent"),
+        title=os.getenv("APP_NAME", "ai-agents"),
         version=__version__,
         description=(
-            "Production SQL Agent powered by Nous Research Hermes Agent Framework. "
-            "Knowledge source: PostgreSQL via read-only SQL tools."
+            "LangChain SQLAgent service (Langflow flow: "
+            "Chat Input → Prompt Template → SQLAgent → Chat Output)."
         ),
         docs_url="/docs",
         redoc_url="/redoc",
@@ -103,59 +111,54 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     def _startup() -> None:
-        from agents.hr_agent import get_hr_agent
-
-        logger.info("Starting SQL Agent API v%s", __version__)
+        logger.info("Starting AI Agents API v%s", __version__)
         try:
-            agent = get_hr_agent()
-            logger.info("SQL Agent readiness: %s", agent.readiness())
+            from agents.orchestrator import get_orchestrator
+
+            orch = get_orchestrator()
+            logger.info("Orchestrator readiness: %s", orch.readiness())
         except Exception:
-            logger.exception("Agent init on startup failed — /ready may return 503")
+            logger.exception("Orchestrator init failed — /ready may be 503")
 
     @app.get("/health")
     def health() -> dict[str, Any]:
-        """Liveness probe — process is up."""
-        return {"status": "ok", "service": os.getenv("APP_NAME", "hr-ai-agent")}
+        return {"status": "ok", "service": os.getenv("APP_NAME", "ai-agents")}
 
     @app.get("/ready")
     def ready() -> dict[str, Any]:
-        """Readiness probe — DB connected and agent initialized."""
-        from agents.hr_agent import get_hr_agent
-        from hr_tools.db_service import get_database_service
+        from agents.orchestrator import get_orchestrator
 
-        agent = get_hr_agent()
-        db = get_database_service().readiness()
-        payload = {
-            "status": "ready" if agent.ready and db.get("ready") else "not_ready",
-            "agent": agent.readiness(),
-            "database": db,
-        }
-        if payload["status"] != "ready":
-            raise HTTPException(status_code=503, detail=payload)
-        return payload
+        orch = get_orchestrator()
+        rd = orch.readiness()
+        if not rd.get("ready"):
+            raise HTTPException(
+                status_code=503,
+                detail={"status": "not_ready", "orchestrator": rd},
+            )
+        return {"status": "ready", "orchestrator": rd}
 
     @app.get("/v1/info")
     def info() -> dict[str, Any]:
-        from agents.hr_agent import get_hr_agent
-        from hr_tools.db_service import get_database_service
+        from agents.orchestrator import get_orchestrator
 
-        agent = get_hr_agent()
-        db = get_database_service().readiness()
+        orch = get_orchestrator()
+        rd = orch.readiness()
         return {
-            "service": os.getenv("APP_NAME", "hr-ai-agent"),
+            "service": os.getenv("APP_NAME", "ai-agents"),
             "version": __version__,
-            "framework": "hermes-agent (Nous Research)",
-            "agent_type": "postgresql-sql-agent",
-            "knowledge_source": "postgresql",
-            "database": {
-                "ready": db.get("ready"),
-                "url_configured": db.get("database_url_configured"),
-                "url_redacted": db.get("database_url_redacted"),
-                "server_version": db.get("server_version"),
+            "design": "multi-agent-orchestrator",
+            "flow": (
+                "Open WebUI → Gateway → POST /v1/chat → "
+                "Orchestrator → sql_agent [+ extra agents]"
+            ),
+            "gateway_compatible": True,
+            "hermes_chat_path": "/v1/chat",
+            "orchestration": {
+                "mode": rd.get("mode"),
+                "agents": rd.get("agents"),
             },
-            "toolsets": os.getenv("HR_ENABLED_TOOLSETS", "sql"),
-            "model": agent.readiness().get("model"),
-            "ready": agent.ready,
+            "details": rd.get("details"),
+            "ready": orch.ready,
         }
 
     @app.post("/v1/chat", response_model=ChatResponse)
@@ -163,45 +166,40 @@ def create_app() -> FastAPI:
         body: ChatRequest,
         _: None = Depends(_check_bearer),
     ) -> ChatResponse:
-        from agents.hr_agent import get_hr_agent
+        """Hermes-compatible entry used by Open WebUI platform gateway."""
+        from agents.orchestrator import get_orchestrator
 
-        agent = get_hr_agent()
-        result = agent.chat(
-            body.message,
-            session_id=body.session_id,
-            reset_session=body.reset_session,
-        )
-        return ChatResponse(**{k: result.get(k) for k in ChatResponse.model_fields})
-
-    @app.post("/v1/tools/{tool_name}")
-    def invoke_tool(
-        tool_name: str,
-        body: ToolRequest,
-        _: None = Depends(_check_bearer),
-    ) -> dict[str, Any]:
-        """
-        Direct tool call for integration tests / automation.
-        Returns the tool's JSON-decoded payload.
-        """
-        import json
-
-        from hr_tools.sql_tool import get_tool_handlers
-
-        handlers = get_tool_handlers()
-        handler = handlers.get(tool_name)
-        if handler is None:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Unknown tool: {tool_name}. Available: {sorted(handlers)}",
-            )
-        raw = handler(body.arguments or {})
         try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            return {"raw": raw}
+            orch = get_orchestrator()
+            result = orch.chat(body.message, session_id=body.session_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("chat endpoint failed: %s", exc, exc_info=True)
+            return ChatResponse(
+                success=False,
+                response=None,
+                session_id=body.session_id,
+                error="Ichki server xatosi. Iltimos keyinroq urinib ko'ring.",
+                error_code="internal",
+                error_detail=str(exc)[:500],
+                retryable=True,
+                tools_called=[],
+                tool_call_count=0,
+            )
+        return ChatResponse(
+            success=bool(result.get("success")),
+            response=result.get("response"),
+            session_id=body.session_id,
+            error=result.get("error"),
+            error_code=result.get("error_code"),
+            error_detail=result.get("error_detail"),
+            retryable=result.get("retryable"),
+            tools_called=result.get("tools_called"),
+            tool_call_count=result.get("tool_call_count"),
+            agents_used=result.get("agents_used"),
+            mode=result.get("mode"),
+        )
 
     return app
 
 
-# Module-level app for uvicorn "app.api:app"
 app = create_app()
