@@ -1,11 +1,11 @@
-"""Agent package — LangChain-style agents + orchestrator for Open WebUI."""
+"""Agent package — Variant 2 Hermes host + LangGraph SQL tool."""
 
-from agents.orchestrator import AgentOrchestrator, get_orchestrator
+from agents.hermes_host import HermesHostService, get_hermes_host
 from agents.sql_agent import SQLAgentService, get_sql_agent
 
 __all__ = [
-    "AgentOrchestrator",
-    "get_orchestrator",
+    "HermesHostService",
+    "get_hermes_host",
     "SQLAgentService",
     "get_sql_agent",
 ]

@@ -36,9 +36,9 @@ def main() -> None:
     setup_logging()
     logger = logging.getLogger("app")
 
-    host = os.getenv("APP_HOST", "0.0.0.0")
-    port = int(os.getenv("APP_PORT", "8080"))
-    workers = int(os.getenv("API_WORKERS", "1"))
+    bind_host = (os.getenv("APP_HOST") or "0.0.0.0").strip() or "0.0.0.0"
+    port = int(os.getenv("APP_PORT") or "8080")
+    workers = int(os.getenv("API_WORKERS") or "1")
     reload = os.getenv("API_RELOAD", "false").strip().lower() in {
         "1",
         "true",
@@ -46,8 +46,14 @@ def main() -> None:
     }
 
     logger.info("=" * 60)
-    logger.info("LangChain SQLAgent — server starting")
-    logger.info("Host=%s Port=%s Workers=%s Reload=%s", host, port, workers, reload)
+    logger.info("Hermes host + SQL tool — server starting (Variant 2)")
+    logger.info(
+        "Bind=%s Port=%s Workers=%s Reload=%s",
+        bind_host,
+        port,
+        workers,
+        reload,
+    )
     logger.info("LLM_MODEL=%s", os.getenv("LLM_MODEL", "gpt-4.1"))
     logger.info(
         "DATABASE_URL configured=%s",
@@ -56,20 +62,20 @@ def main() -> None:
     logger.info("=" * 60)
 
     try:
-        from agents.sql_agent import get_sql_agent
+        from agents.hermes_host import get_hermes_host
 
-        agent = get_sql_agent()
-        logger.info("SQLAgent readiness: %s", agent.readiness())
+        hermes = get_hermes_host()
+        logger.info("Hermes host readiness: %s", hermes.readiness())
     except Exception:
         logger.exception(
-            "SQLAgent init failed at startup — API starts; /ready may return 503"
+            "Hermes host init failed at startup — API starts; /ready may return 503"
         )
 
     import uvicorn
 
     uvicorn.run(
         "app.api:app",
-        host=host,
+        host=bind_host,
         port=port,
         workers=1 if reload else max(1, workers),
         reload=reload,

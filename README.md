@@ -1,65 +1,56 @@
-# AI Agents — LangChain SQLAgent
-
-Langflow-compatible flow:
+# Variant 2 — Hermes host + SQL tool (LangGraph)
 
 ```text
-Chat Input → Prompt Template → SQLAgent → Chat Output
+Open WebUI → Gateway → POST /v1/chat
+     → Hermes host agent  (conversation + memory)
+          → tool: sql_ask
+               → LangGraph / LangChain SQL agent
+                    → PostgreSQL (DATABASE_URL)
 ```
 
-Built with **LangChain** `create_sql_agent` + `SQLDatabaseToolkit` (same as Langflow 1.9.2 SQLAgent node).
+## Why this design
+
+- **Hermes host** owns multi-turn context / session history.
+- **SQL stack** stays LangGraph (schema + readonly SQL tools).
+- Gateway keeps `HERMES_GIS_BASE_URL=http://host.docker.internal:8080`.
+
+If the `hermes-agent` package is missing, **hermes_lite** runs the same pattern
+(outer tool-calling host + `sql_ask`).
 
 ## Configure
 
-```bash
-cp .env.example .env
-# set OPENAI_API_KEY, DATABASE_URL, LLM_MODEL=gpt-4.1
+```env
+OPENAI_API_KEY=...
+DATABASE_URL=postgresql://...
+LLM_MODEL=gpt-4.1
+HERMES_SKIP_MEMORY=false
+HERMES_ENABLED_TOOLSETS=sql_bridge
 ```
 
-Prompt (from Langflow Prompt Template): `prompts/sql_agent_system.md`
+## API
+
+| Method | Path | Role |
+|--------|------|------|
+| POST | `/v1/chat` | Host chat (`session_id` for memory) |
+| GET | `/ready` | Host + inner SQL ready |
+| GET | `/v1/info` | Architecture metadata |
 
 ## Run
-
-```bash
-pip install -r requirements.txt
-python -m app.main
-```
-
-Docker:
 
 ```bash
 docker compose build
 docker compose up -d
 ```
 
-## API (Hermes-compatible → Open WebUI gateway)
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/health` | Liveness |
-| GET | `/ready` | Orchestrator + agents ready |
-| GET | `/v1/info` | Metadata + agent list |
-| POST | `/v1/chat` | `{"message":"..."}` — **single entry for gateway** |
-
-### Multi-agent
+## Layout
 
 ```text
-Open WebUI → Gateway (HERMES_GIS_BASE_URL) → this app /v1/chat
-                                         → Orchestrator
-                                         → sql_agent [+ extra_agent…]
-```
-
-| Env | Meaning |
-|-----|---------|
-| `AGENT_ORCHESTRATION_MODE=sql_only` | Only SQL (default) |
-| `sequential` | Agent1 then Agent2 (context passed) |
-| `parallel` | All agents, merge answers |
-| `route` | Keyword pick one agent |
-| `AGENT_EXTRA_ENABLED=true` | Load `agents/extra_agent.py` |
-
-Gateway URL **does not change** when you add agents — still one base URL.
-
-```bash
-curl -s http://127.0.0.1:8080/v1/chat \
-  -H "Content-Type: application/json" \
-  -d "{\"message\":\"Statistika qo'mitasi markaziy apparatida nechta odam ishlaydi?\"}"
+agents/
+  hermes_host.py      # host agent (Hermes or hermes_lite)
+  sql_bridge_tool.py  # sql_ask tool
+  sql_agent.py        # LangGraph SQL implementation
+plugins/sql-bridge/   # Hermes plugin registration
+prompts/
+  hermes_coordinator.md   # host system prompt
+  sql_agent_system.md     # inner SQL agent prompt (Langflow text)
 ```

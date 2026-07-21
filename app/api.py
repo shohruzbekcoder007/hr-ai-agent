@@ -1,7 +1,10 @@
 """
-FastAPI surface for multi-agent service (Hermes-compatible for Open WebUI gateway).
+FastAPI — Variant 2 Hermes host + SQL tool.
 
-  Open WebUI → Gateway → POST /v1/chat → Orchestrator → sql_agent [+ extra agents]
+  Open WebUI → Gateway → POST /v1/chat
+       → Hermes host (context/memory)
+            → tool sql_ask
+                 → LangGraph SQL agent → PostgreSQL
 """
 
 from __future__ import annotations
@@ -26,26 +29,19 @@ class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, description="User question")
     session_id: Optional[str] = Field(
         default=None,
-        description="Optional multi-turn session id (gateway may send)",
+        description="Multi-turn session id (Hermes host memory)",
     )
     reset_session: bool = Field(
         default=False,
-        description="Hermes-compatible flag; reserved",
+        description="Clear Hermes host session history",
     )
 
 
 class ChatResponse(BaseModel):
-    """
-    Hermes-compatible response shape for gateway:
-
-      { "success", "response", "session_id", "error", ... }
-    """
-
     success: bool
     response: Optional[str] = None
     session_id: Optional[str] = None
     error: Optional[str] = None
-    # Extra diagnostics (gateway may ignore unknown fields)
     error_code: Optional[str] = None
     error_detail: Optional[str] = None
     retryable: Optional[bool] = None
@@ -53,12 +49,8 @@ class ChatResponse(BaseModel):
     tool_call_count: Optional[int] = None
     agents_used: Optional[list[str]] = None
     mode: Optional[str] = None
-    # Old Hermes field (always null for SQL agent)
+    backend: Optional[str] = None
     employee_count: Optional[int] = None
-
-
-class ToolRequest(BaseModel):
-    arguments: dict[str, Any] = Field(default_factory=dict)
 
 
 def _cors_origins() -> list[str]:
@@ -94,8 +86,8 @@ def create_app() -> FastAPI:
         title=os.getenv("APP_NAME", "ai-agents"),
         version=__version__,
         description=(
-            "LangChain SQLAgent service (Langflow flow: "
-            "Chat Input → Prompt Template → SQLAgent → Chat Output)."
+            "Variant 2: Hermes host agent + sql_ask tool → LangGraph SQL agent. "
+            "Open WebUI gateway compatible (POST /v1/chat)."
         ),
         docs_url="/docs",
         redoc_url="/redoc",
@@ -111,14 +103,14 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     def _startup() -> None:
-        logger.info("Starting AI Agents API v%s", __version__)
+        logger.info("Starting Hermes-host SQL service v%s", __version__)
         try:
-            from agents.orchestrator import get_orchestrator
+            from agents.hermes_host import get_hermes_host
 
-            orch = get_orchestrator()
-            logger.info("Orchestrator readiness: %s", orch.readiness())
+            host = get_hermes_host()
+            logger.info("Hermes host readiness: %s", host.readiness())
         except Exception:
-            logger.exception("Orchestrator init failed — /ready may be 503")
+            logger.exception("Hermes host init failed — /ready may be 503")
 
     @app.get("/health")
     def health() -> dict[str, Any]:
@@ -126,39 +118,38 @@ def create_app() -> FastAPI:
 
     @app.get("/ready")
     def ready() -> dict[str, Any]:
-        from agents.orchestrator import get_orchestrator
+        from agents.hermes_host import get_hermes_host
 
-        orch = get_orchestrator()
-        rd = orch.readiness()
+        host = get_hermes_host()
+        if not host.ready:
+            host.initialize()
+        rd = host.readiness()
         if not rd.get("ready"):
             raise HTTPException(
                 status_code=503,
-                detail={"status": "not_ready", "orchestrator": rd},
+                detail={"status": "not_ready", "host": rd},
             )
-        return {"status": "ready", "orchestrator": rd}
+        return {"status": "ready", "host": rd}
 
     @app.get("/v1/info")
     def info() -> dict[str, Any]:
-        from agents.orchestrator import get_orchestrator
+        from agents.hermes_host import get_hermes_host
 
-        orch = get_orchestrator()
-        rd = orch.readiness()
+        host = get_hermes_host()
+        rd = host.readiness()
         return {
             "service": os.getenv("APP_NAME", "ai-agents"),
             "version": __version__,
-            "design": "multi-agent-orchestrator",
-            "flow": (
-                "Open WebUI → Gateway → POST /v1/chat → "
-                "Orchestrator → sql_agent [+ extra agents]"
-            ),
+            "design": "hermes-host-sql-tool",
+            "variant": 2,
+            "architecture": rd.get("architecture"),
+            "backend": rd.get("backend"),
             "gateway_compatible": True,
             "hermes_chat_path": "/v1/chat",
-            "orchestration": {
-                "mode": rd.get("mode"),
-                "agents": rd.get("agents"),
-            },
-            "details": rd.get("details"),
-            "ready": orch.ready,
+            "tool": "sql_ask",
+            "inner_sql": rd.get("sql_agent"),
+            "ready": host.ready,
+            "model": rd.get("model"),
         }
 
     @app.post("/v1/chat", response_model=ChatResponse)
@@ -166,12 +157,16 @@ def create_app() -> FastAPI:
         body: ChatRequest,
         _: None = Depends(_check_bearer),
     ) -> ChatResponse:
-        """Hermes-compatible entry used by Open WebUI platform gateway."""
-        from agents.orchestrator import get_orchestrator
+        """Gateway entry: Hermes host keeps context; SQL via sql_ask tool."""
+        from agents.hermes_host import get_hermes_host
 
         try:
-            orch = get_orchestrator()
-            result = orch.chat(body.message, session_id=body.session_id)
+            host = get_hermes_host()
+            result = host.chat(
+                body.message,
+                session_id=body.session_id,
+                reset_session=body.reset_session,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.error("chat endpoint failed: %s", exc, exc_info=True)
             return ChatResponse(
@@ -182,13 +177,11 @@ def create_app() -> FastAPI:
                 error_code="internal",
                 error_detail=str(exc)[:500],
                 retryable=True,
-                tools_called=[],
-                tool_call_count=0,
             )
         return ChatResponse(
             success=bool(result.get("success")),
             response=result.get("response"),
-            session_id=body.session_id,
+            session_id=result.get("session_id") or body.session_id,
             error=result.get("error"),
             error_code=result.get("error_code"),
             error_detail=result.get("error_detail"),
@@ -197,6 +190,7 @@ def create_app() -> FastAPI:
             tool_call_count=result.get("tool_call_count"),
             agents_used=result.get("agents_used"),
             mode=result.get("mode"),
+            backend=result.get("backend"),
         )
 
     return app
