@@ -162,6 +162,13 @@ def create_app() -> FastAPI:
 
         try:
             host = get_hermes_host()
+            logger.info(
+                "POST /v1/chat session_id=%r reset=%s msg_len=%d msg_preview=%r",
+                body.session_id,
+                body.reset_session,
+                len(body.message or ""),
+                (body.message or "")[:80],
+            )
             result = host.chat(
                 body.message,
                 session_id=body.session_id,

@@ -323,9 +323,21 @@ class HermesHostService:
                     "session_id": session_id,
                 }
 
-            sid = session_id or str(uuid.uuid4())
+            client_sid = (session_id or "").strip() or None
+            sid = client_sid or str(uuid.uuid4())
             if reset_session:
                 self.clear_session(sid)
+
+            prior_len = 0
+            with _lock:
+                prior_len = len(self._sessions.get(sid, []))
+            logger.info(
+                "host.chat client_session_id=%r effective_sid=%s prior_history=%d backend=%s",
+                client_sid,
+                sid,
+                prior_len,
+                self._backend,
+            )
 
             if self._backend == "hermes":
                 return self._chat_hermes(message, sid)
