@@ -89,14 +89,28 @@ def load_system_prompt() -> str:
     return path.read_text(encoding="utf-8")
 
 
+_MULTI_SCRIPT_HINT = """
+[TEXT SEARCH RULES — apply on every free-text filter]
+- Database text may be Cyrillic (крилл/кирилл), Latin (lotin), or English.
+- Always use ILIKE with partial patterns: '%fragment%'.
+- OR-match Cyrillic + Latin + English variants of the same meaning.
+- Also match word fragments (parts of multi-word phrases), not only the full phrase.
+- Prefer including Cyrillic forms because most warehouse labels are Cyrillic.
+- If 0 rows: broaden tokens/scripts and re-query. Never invent data.
+""".strip()
+
+
 def _format_user_prompt(template: str, user_message: str) -> str:
+    """Apply prompt template and always attach multi-script ILIKE search rules."""
+    msg = (user_message or "").strip()
+    enriched = f"{msg}\n\n{_MULTI_SCRIPT_HINT}"
     if "{input}" in template:
-        return template.replace("{input}", user_message)
+        return template.replace("{input}", enriched)
     return (
         template.rstrip()
         + "\n\n------------------------------------------------------------\n\n"
         + "User Question:\n\n"
-        + user_message
+        + enriched
     )
 
 
