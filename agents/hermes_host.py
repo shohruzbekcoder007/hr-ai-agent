@@ -80,7 +80,7 @@ class HermesHostService:
         self.api_key = _env("OPENAI_API_KEY") or _env("LLM_API_KEY") or _env("HERMES_API_KEY")
         self.base_url = _env("OPENAI_BASE_URL") or _env("HERMES_BASE_URL") or None
         self.max_iterations = _env_int("HERMES_MAX_ITERATIONS", 12)
-        self.session_limit = _env_int("HERMES_SESSION_HISTORY_LIMIT", 20)
+        self.session_limit = _env_int("HERMES_SESSION_HISTORY_LIMIT", 6)
         self.skip_memory = _env_bool("HERMES_SKIP_MEMORY", False)
         self.system_prompt = _load_coordinator_prompt()
         self._backend: str | None = None  # hermes | hermes_lite
