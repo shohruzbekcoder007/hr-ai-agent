@@ -1,11 +1,12 @@
 # =============================================================================
-# LangChain SQLAgent service — multi-stage, non-root
-# Flow: Chat Input → Prompt Template → SQLAgent → Chat Output
+# Variant 2: Hermes host + sql_ask tool → LangGraph SQL agent
 # =============================================================================
 
 FROM python:3.12-slim-bookworm AS builder
 
 ARG DEBIAN_FRONTEND=noninteractive
+ARG HERMES_REPO=https://github.com/NousResearch/hermes-agent.git
+ARG HERMES_REF=main
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -14,6 +15,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        git \
         build-essential \
         curl \
         ca-certificates \
@@ -24,13 +26,16 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /build
 
+# Hermes framework (optional at runtime — hermes_lite fallback if import fails)
+RUN pip install --upgrade pip setuptools wheel \
+    && git clone --depth 1 --branch "${HERMES_REF}" "${HERMES_REPO}" /opt/hermes-agent \
+    && (pip install /opt/hermes-agent || echo "WARNING: hermes-agent pip failed — hermes_lite fallback")
+
 COPY requirements.txt pyproject.toml README.md ./
 COPY agents ./agents
 COPY app ./app
 
-# Install deps from requirements first (explicit), then package
-RUN pip install --upgrade pip setuptools wheel \
-    && pip install -r requirements.txt \
+RUN pip install -r requirements.txt \
     && pip install .
 
 # -----------------------------------------------------------------------------
@@ -44,6 +49,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:$PATH" \
     APP_HOME=/app \
+    HR_APP_ROOT=/app \
+    HERMES_HOME=/home/appuser/.hermes \
+    HERMES_ENABLE_PROJECT_PLUGINS=true \
+    HERMES_ENABLED_TOOLSETS=sql_bridge \
+    SYSTEM_PROMPT_PATH=/app/prompts/sql_agent_system.md \
+    HERMES_SYSTEM_PROMPT_PATH=/app/prompts/hermes_coordinator.md \
     LOG_DIR=/app/logs \
     APP_HOST=0.0.0.0 \
     APP_PORT=8080 \
@@ -60,25 +71,30 @@ RUN apt-get update \
     && useradd --uid "${APP_UID}" --gid appuser --create-home --shell /usr/sbin/nologin appuser
 
 COPY --from=builder /opt/venv /opt/venv
+# May be missing if hermes pip install failed — hermes_lite still works
+COPY --from=builder /opt/hermes-agent /opt/hermes-agent
 
 WORKDIR /app
 
 COPY --chown=appuser:appuser agents ./agents
 COPY --chown=appuser:appuser app ./app
 COPY --chown=appuser:appuser prompts ./prompts
+COPY --chown=appuser:appuser plugins ./plugins
 COPY --chown=appuser:appuser config ./config
 COPY --chown=appuser:appuser scripts ./scripts
 COPY --chown=appuser:appuser requirements.txt pyproject.toml README.md ./
 
-RUN mkdir -p /app/logs \
-    && chown -R appuser:appuser /app/logs \
+RUN mkdir -p /app/logs /home/appuser/.hermes/plugins /home/appuser/.hermes/logs \
+    && cp -a /app/plugins/sql-bridge /home/appuser/.hermes/plugins/sql-bridge \
+    && cp /app/config/hermes_config.yaml /home/appuser/.hermes/config.yaml \
+    && chown -R appuser:appuser /app/logs /home/appuser \
     && chmod +x /app/scripts/*.sh
 
 USER appuser
 
 EXPOSE 8080
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
     CMD ["/app/scripts/healthcheck.sh"]
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/app/scripts/start.sh"]

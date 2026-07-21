@@ -34,8 +34,14 @@ services:
       SQL_AGENT_VERBOSE: ${SQL_AGENT_VERBOSE:-true}
       SQL_AGENT_HANDLE_PARSING_ERRORS: ${SQL_AGENT_HANDLE_PARSING_ERRORS:-true}
       SYSTEM_PROMPT_PATH: /app/prompts/sql_agent_system.md
-      AGENT_ORCHESTRATION_MODE: ${AGENT_ORCHESTRATION_MODE:-sql_only}
-      AGENT_EXTRA_ENABLED: ${AGENT_EXTRA_ENABLED:-false}
+      HERMES_HOME: /home/appuser/.hermes
+      HERMES_ENABLE_PROJECT_PLUGINS: "true"
+      HERMES_ENABLED_TOOLSETS: ${HERMES_ENABLED_TOOLSETS:-sql_bridge}
+      HERMES_SYSTEM_PROMPT_PATH: /app/prompts/hermes_coordinator.md
+      HERMES_MAX_ITERATIONS: ${HERMES_MAX_ITERATIONS:-12}
+      HERMES_SESSION_HISTORY_LIMIT: ${HERMES_SESSION_HISTORY_LIMIT:-20}
+      HERMES_SKIP_MEMORY: ${HERMES_SKIP_MEMORY:-false}
+      HERMES_REASONING_ENABLED: ${HERMES_REASONING_ENABLED:-false}
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
       HEALTHCHECK_URL: http://127.0.0.1:8080/health
 
@@ -46,6 +52,7 @@ services:
       - ./logs:/app/logs:rw
       - ./config:/app/config:ro
       - ./prompts:/app/prompts:ro
+      - ./plugins:/app/plugins:ro
 
     healthcheck:
       test: ["CMD", "/app/scripts/healthcheck.sh"]
