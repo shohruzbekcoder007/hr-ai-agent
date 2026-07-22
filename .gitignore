@@ -49,6 +49,11 @@ logs/*
 *.log
 *.log.*
 
+# Self-improving store (generated at runtime)
+data/*.json
+data/*.json.tmp
+!data/.gitkeep
+
 # IDE / OS
 .idea/
 .vscode/

@@ -577,7 +577,23 @@ class SQLAgentService:
             "error": self._last_error,
             "agent_type": "langchain-sql-agent",
             "flow": "Chat Input → Prompt Template → SQLAgent → Chat Output",
+            "self_improve": self._self_improve_stats(),
         }
+
+    @staticmethod
+    def _self_improve_stats() -> dict[str, Any]:
+        try:
+            from agents import self_improve
+
+            s = self_improve.stats()
+            # keep readiness compact — drop the sample list
+            return {
+                "enabled": s.get("enabled"),
+                "count": s.get("count"),
+                "top_k": s.get("top_k"),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"enabled": False, "error": str(exc)}
 
     def _run_once(self, full_input: str) -> dict[str, Any]:
         tools_called: list[dict[str, Any]] = []
@@ -670,6 +686,15 @@ class SQLAgentService:
                     backend=self._backend,
                 )
 
+            # Global self-improving: inject top-k learned SQL patterns for
+            # similar past questions (best-effort; never breaks the chat path).
+            try:
+                from agents import self_improve
+
+                full_input = self_improve.augment_prompt(full_input, message)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("self_improve augment skipped: %s", exc)
+
             logger.info(
                 "SQLAgent chat backend=%s message_len=%d",
                 self._backend,
@@ -677,11 +702,19 @@ class SQLAgentService:
             )
 
             try:
-                return _invoke_with_retry(
+                result = _invoke_with_retry(
                     lambda: self._run_once(full_input),
                     max_retries=self.max_retries,
                     what="sql_agent_chat",
                 )
+                # Learn from a successful run (question → executed SQL).
+                try:
+                    from agents import self_improve
+
+                    self_improve.learn_from_result(message, result)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("self_improve learn skipped: %s", exc)
+                return result
             except Exception as exc:  # noqa: BLE001
                 info = _friendly_error(exc)
                 # rate limit / transient: warning only (no huge stack spam)

@@ -131,6 +131,13 @@ def create_app() -> FastAPI:
             )
         return {"status": "ready", "host": rd}
 
+    @app.get("/v1/self-improve")
+    def self_improve_stats() -> dict[str, Any]:
+        """Inspect the global self-improving recipe store (learned SQL patterns)."""
+        from agents import self_improve
+
+        return self_improve.stats()
+
     @app.get("/v1/info")
     def info() -> dict[str, Any]:
         from agents.hermes_host import get_hermes_host

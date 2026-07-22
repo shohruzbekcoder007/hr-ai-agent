@@ -34,6 +34,31 @@ HERMES_ENABLED_TOOLSETS=sql_bridge
 | POST | `/v1/chat` | Host chat (`session_id` for memory) |
 | GET | `/ready` | Host + inner SQL ready |
 | GET | `/v1/info` | Architecture metadata |
+| GET | `/v1/self-improve` | Learned SQL-pattern store stats |
+
+## Self-improving (global recipe store)
+
+The SQL agent learns across all users/sessions of this instance:
+
+- Every **successful** question is stored with the **executed SQL** as a
+  reusable *recipe* (`data/self_improve.json`, mounted volume).
+- On a new question, the **top-k** most similar recipes are injected into the
+  SQL prompt as few-shot examples — so working SQL / multi-script term
+  mappings are reused instead of re-derived.
+- **No prompt bloat**: only top-k are injected; the store is bounded
+  (`SELF_IMPROVE_MAX_RECIPES`, least-used pruned) — curation, not accumulation.
+- **Leak-safe & global**: stores the SQL *technique*, never result rows; one
+  shared store benefits everyone (single shared database).
+
+Backend-agnostic — works under `hermes`, `hermes_lite`, or plain LangGraph.
+
+```env
+SELF_IMPROVE_ENABLED=true
+SELF_IMPROVE_STORE_PATH=./data/self_improve.json
+SELF_IMPROVE_TOP_K=3
+SELF_IMPROVE_MIN_SCORE=0.18
+SELF_IMPROVE_MAX_RECIPES=500
+```
 
 ## Run
 

@@ -87,10 +87,10 @@ COPY --chown=appuser:appuser requirements.txt pyproject.toml README.md ./
 # Strip Windows CRLF from shell scripts (avoids: /usr/bin/env: 'bash\r')
 RUN sed -i 's/\r$//' /app/scripts/*.sh \
     && chmod +x /app/scripts/*.sh \
-    && mkdir -p /app/logs /home/appuser/.hermes/plugins /home/appuser/.hermes/logs \
+    && mkdir -p /app/logs /app/data /home/appuser/.hermes/plugins /home/appuser/.hermes/logs \
     && if [ -d /app/plugins/sql-bridge ]; then cp -a /app/plugins/sql-bridge /home/appuser/.hermes/plugins/sql-bridge; fi \
     && if [ -f /app/config/hermes_config.yaml ]; then cp /app/config/hermes_config.yaml /home/appuser/.hermes/config.yaml; fi \
-    && chown -R appuser:appuser /app/logs /home/appuser
+    && chown -R appuser:appuser /app/logs /app/data /home/appuser
 
 USER appuser
 
