@@ -60,11 +60,26 @@ RAG_EMBED_URL=http://host.docker.internal:8090
 | GET | `/v1/docs/info` | RAG config + stats |
 | GET | `/v1/docs/files` | Files under `RAG_DOCS_DIR` |
 
-## Document RAG
+## Document RAG + Document Intelligence
 
 1. Put PDF / DOCX / MD / TXT into `data/docs/` (Docker volume `./data`).
 2. `POST /v1/docs/reindex` (same bearer as chat if `API_BEARER_TOKEN` set).
 3. Ask via `POST /v1/docs/chat` or host chat (`docs_ask`).
+
+On reindex the app:
+
+- detects structure (bob/modda / chapter/article) when present;
+- stores **document profiles** (counts, type) + TOC chunks;
+- indexes article-level chunks with rich metadata (`article_num`, `chapter_num`, `heading_path`);
+- falls back to semantic chunks for unstructured files.
+
+Query routing:
+
+| Savol | Mode |
+|--------|------|
+| Nechta bob/modda? | `structured_counts` (profile stats) |
+| 15-modda qaysi bobda? | `hierarchy` + metadata |
+| oddiy mazmun | hybrid semantic (embedding-service) |
 
 **Embedding switch:** change model on **embedding-service** env (or local `RAG_EMBED_*`), then **full reindex** here (`POST /v1/docs/reindex`).  
 `index_key` comes from the embed service (`provider__model__d{dim}`); Chroma paths never mix dimensions.

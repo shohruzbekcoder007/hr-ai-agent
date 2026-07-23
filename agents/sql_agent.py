@@ -97,13 +97,193 @@ _MULTI_SCRIPT_HINT = """
 - Also match word fragments (parts of multi-word phrases), not only the full phrase.
 - Prefer including Cyrillic forms because most warehouse labels are Cyrillic.
 - If 0 rows: broaden tokens/scripts and re-query. Never invent data.
+
+[PERSON NAME RULES — when the question mentions a person]
+- Employee names are often stored in CYRILLIC while the user types LATIN.
+- Split full name into tokens; search each token with ILIKE on first_name AND last_name
+  (token order may not match column order).
+- Strip apostrophes for Latin variants (Shohro'zbek → Shohrozbek / Shohruzbek / Shohr%).
+- ALWAYS OR-match the auto-generated Cyrillic ILIKE patterns listed below when present.
+- If full-name AND filter returns 0 rows: re-query with SURNAME ONLY, list candidates.
+- Never say "not found" after only one narrow Latin full-name match.
 """.strip()
 
 
+# Latin (Uzbek) → Cyrillic digraphs first, then singles (approx. for name ILIKE).
+_LAT_CYR_DIGRAPHS = (
+    ("sh", "ш"),
+    ("ch", "ч"),
+    ("ng", "нг"),
+    ("yo", "ё"),
+    ("yu", "ю"),
+    ("ya", "я"),
+    ("ye", "е"),
+    ("o'", "ў"),
+    ("g'", "ғ"),
+    ("o‘", "ў"),
+    ("g‘", "ғ"),
+    ("oʻ", "ў"),
+    ("gʻ", "ғ"),
+)
+_LAT_CYR_SINGLE = {
+    "a": "а",
+    "b": "б",
+    "d": "д",
+    "e": "е",
+    "f": "ф",
+    "g": "г",
+    "h": "ҳ",
+    "i": "и",
+    "j": "ж",
+    "k": "к",
+    "l": "л",
+    "m": "м",
+    "n": "н",
+    "o": "о",
+    "p": "п",
+    "q": "қ",
+    "r": "р",
+    "s": "с",
+    "t": "т",
+    "u": "у",
+    "v": "в",
+    "x": "х",
+    "y": "й",
+    "z": "з",
+    "'": "",
+    "ʻ": "",
+    "ʼ": "",
+    "`": "",
+}
+
+
+def _latin_to_cyrillic_uz(token: str) -> str:
+    """Approximate Uzbek Latin → Cyrillic for ILIKE name search."""
+    s = (token or "").lower().strip()
+    if not s:
+        return ""
+    # normalize apostrophe variants
+    for a in ("'", "'", "ʻ", "ʼ", "`", "´"):
+        s = s.replace(a, "'")
+    out: list[str] = []
+    i = 0
+    while i < len(s):
+        matched = False
+        for lat, cyr in _LAT_CYR_DIGRAPHS:
+            if s.startswith(lat, i):
+                out.append(cyr)
+                i += len(lat)
+                matched = True
+                break
+        if matched:
+            continue
+        ch = s[i]
+        out.append(_LAT_CYR_SINGLE.get(ch, ch))
+        i += 1
+    return "".join(out)
+
+
+_NAME_STOP = {
+    "kim",
+    "qaysi",
+    "qayerda",
+    "qayer",
+    "ishlaydi",
+    "ishlayotgan",
+    "boshqarma",
+    "boshqarmada",
+    "bolim",
+    "bo'lim",
+    "lavozim",
+    "haqida",
+    "the",
+    "who",
+    "where",
+    "works",
+    "is",
+    "in",
+}
+
+
+def _extract_latin_name_tokens(message: str) -> list[str]:
+    """Capitalized or latin alpha tokens likely to be person-name parts."""
+    msg = message or ""
+    # tokens with Latin letters (incl. apostrophe)
+    raw = re.findall(r"[A-Za-z][A-Za-z'ʻʼ`]{1,40}", msg)
+    out: list[str] = []
+    for t in raw:
+        tl = t.lower().strip("'ʻʼ`")
+        if len(tl) < 3 or tl in _NAME_STOP:
+            continue
+        if t[0].isupper() or tl.endswith(("ov", "ova", "ev", "eva", "yev", "yeva")):
+            out.append(t.strip())
+        elif len(tl) >= 4:
+            out.append(t.strip())
+    # unique preserve order
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for t in out:
+        k = t.lower()
+        if k not in seen:
+            seen.add(k)
+            uniq.append(t)
+    return uniq[:6]
+
+
+def _name_search_expand_block(message: str) -> str:
+    """
+    Inject concrete ILIKE fragments so the SQL agent does not rely only on
+    the model inventing Cyrillic spellings (main failure mode for Latin names).
+    """
+    tokens = _extract_latin_name_tokens(message)
+    if not tokens:
+        return ""
+    lines = [
+        "[AUTO NAME VARIANTS — MUST use these ILIKE patterns on employees.first_name / last_name]",
+        "Search tokens separately; combine with AND across different name parts, OR within variants of one part.",
+    ]
+    for t in tokens:
+        bare = re.sub(r"['ʻʼ`´]", "", t)
+        cyr = _latin_to_cyrillic_uz(t)
+        cyr_bare = _latin_to_cyrillic_uz(bare)
+        variants = []
+        for v in (t, bare, t[: max(4, len(t) - 2)], bare[: max(4, len(bare) - 2)]):
+            if v and len(v) >= 3:
+                variants.append(f"%{v}%")
+        for v in (cyr, cyr_bare):
+            if v and len(v) >= 2 and re.search(r"[Ѐ-ӿ]", v):
+                variants.append(f"%{v}%")
+        # stem for Shohr* style
+        if len(bare) >= 5:
+            variants.append(f"%{bare[:5]}%")
+            c5 = _latin_to_cyrillic_uz(bare[:5])
+            if c5:
+                variants.append(f"%{c5}%")
+        # unique
+        seen: set[str] = set()
+        uniq_v: list[str] = []
+        for v in variants:
+            vl = v.lower()
+            if vl not in seen:
+                seen.add(vl)
+                uniq_v.append(v)
+        lines.append(f"- token '{t}': " + " OR ".join(f"ILIKE '{v}'" for v in uniq_v[:12]))
+    if len(tokens) >= 2:
+        lines.append(
+            "If AND across all tokens returns 0 rows, re-run with ONLY the surname-like "
+            "token (often last or the one ending in ov/ova/ев/ов) and list all matches."
+        )
+    return "\n".join(lines)
+
+
 def _format_user_prompt(template: str, user_message: str) -> str:
-    """Apply prompt template and always attach multi-script ILIKE search rules."""
+    """Apply prompt template and always attach multi-script + name-expand rules."""
     msg = (user_message or "").strip()
-    enriched = f"{msg}\n\n{_MULTI_SCRIPT_HINT}"
+    expand = _name_search_expand_block(msg)
+    parts = [msg, "", _MULTI_SCRIPT_HINT]
+    if expand:
+        parts.extend(["", expand])
+    enriched = "\n".join(parts)
     if "{input}" in template:
         return template.replace("{input}", enriched)
     return (

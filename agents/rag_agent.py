@@ -87,6 +87,31 @@ def _chunk_id(source: str, page: Any, index: int, text: str) -> str:
     return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()[:40]
 
 
+def _stable_id(*parts: Any) -> str:
+    raw = "|".join(str(p) for p in parts)
+    return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()[:40]
+
+
+def _chroma_meta(meta: dict[str, Any]) -> dict[str, Any]:
+    """Chroma only accepts str/int/float/bool scalars."""
+    out: dict[str, Any] = {}
+    for k, v in (meta or {}).items():
+        if v is None:
+            continue
+        if isinstance(v, bool):
+            out[k] = v
+        elif isinstance(v, int):
+            out[k] = v
+        elif isinstance(v, float):
+            out[k] = v
+        else:
+            s = str(v)
+            if len(s) > 1000:
+                s = s[:1000]
+            out[k] = s
+    return out
+
+
 def load_system_prompt() -> str:
     path = _prompt_path()
     if path.is_file():
@@ -241,6 +266,7 @@ class RAGAgentService:
         self._collection: Any = None
         self._client: Any = None
         self._manifest: dict[str, Any] = {}
+        self._profiles: list[dict[str, Any]] = []
         self._system_prompt = load_system_prompt()
         self.top_k = _env_int("RAG_TOP_K", 5)
         self.chunk_size = _env_int("RAG_CHUNK_SIZE", 800)
@@ -260,6 +286,9 @@ class RAGAgentService:
     def _manifest_path(self) -> Path:
         return self._index_dir() / "manifest.json"
 
+    def _profiles_path(self) -> Path:
+        return self._index_dir() / "document_profiles.json"
+
     def _read_manifest(self) -> dict[str, Any]:
         path = self._manifest_path()
         if not path.is_file():
@@ -277,6 +306,30 @@ class RAGAgentService:
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(tmp, path)
         self._manifest = data
+
+    def _read_profiles(self) -> list[dict[str, Any]]:
+        path = self._profiles_path()
+        if not path.is_file():
+            return []
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                profs = data.get("profiles")
+                return profs if isinstance(profs, list) else []
+            if isinstance(data, list):
+                return data
+        except Exception:  # noqa: BLE001
+            return []
+        return []
+
+    def _write_profiles(self, profiles: list[dict[str, Any]]) -> None:
+        path = self._profiles_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"version": 1, "profiles": profiles, "updated_at": _now_iso()}
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+        self._profiles = profiles
 
     def _identity_matches_manifest(self) -> bool:
         from agents.embeddings import get_embed_identity
@@ -315,6 +368,7 @@ class RAGAgentService:
                 # on corrupt / cross-OS volume indexes — never kill the process.
                 self._open_chroma(index_dir)
                 self._manifest = self._read_manifest()
+                self._profiles = self._read_profiles()
 
                 if self._manifest and not self._identity_matches_manifest():
                     self._last_error = (
@@ -547,36 +601,190 @@ class RAGAgentService:
                 all_ids: list[str] = []
                 all_docs: list[str] = []
                 all_metas: list[dict[str, Any]] = []
+                profiles: list[dict[str, Any]] = []
+
+                from agents.doc_structure import (
+                    build_document_profile,
+                    build_toc_text,
+                    extract_structure,
+                    structure_aware_units,
+                )
 
                 for fpath in files:
                     try:
-                        units = load_file(fpath)
+                        page_units = load_file(fpath)
                     except Exception as exc:  # noqa: BLE001
                         warnings.append(f"{fpath.name}: load failed: {exc}")
                         continue
-                    if not units:
+                    if not page_units:
                         warnings.append(f"{fpath.name}: no extractable text")
                         continue
-                    for unit in units:
-                        pieces = _split_text(
-                            unit["text"], self.chunk_size, self.chunk_overlap
-                        )
-                        for idx, piece in enumerate(pieces):
-                            cid = _chunk_id(
-                                unit["source"], unit.get("page"), idx, piece
-                            )
-                            meta = {
-                                "source": str(unit["source"]),
-                                "path": str(unit.get("path") or fpath),
-                                "page": unit.get("page")
-                                if unit.get("page") is not None
-                                else -1,
-                                "file_type": str(unit.get("file_type") or ""),
-                                "chunk_index": idx,
+
+                    # Full text + page map for structure extraction
+                    parts: list[str] = []
+                    page_map: list[tuple[int, int, int]] = []
+                    cursor = 0
+                    for unit in page_units:
+                        t = unit.get("text") or ""
+                        if not t:
+                            continue
+                        start = cursor
+                        parts.append(t)
+                        cursor += len(t) + 2  # "\n\n"
+                        page_no = unit.get("page")
+                        if page_no is None:
+                            page_no = -1
+                        page_map.append((start, cursor, int(page_no)))
+                    full_text = "\n\n".join(parts)
+                    if not full_text.strip():
+                        warnings.append(f"{fpath.name}: empty after join")
+                        continue
+
+                    structure = extract_structure(full_text, filename=fpath.name)
+                    page_count = sum(
+                        1 for u in page_units if u.get("page") is not None
+                    )
+                    profile = build_document_profile(
+                        source=fpath.name,
+                        text=full_text,
+                        structure=structure,
+                        page_count=page_count or len(page_units),
+                    )
+                    profiles.append(profile)
+                    logger.info(
+                        "structure %s quality=%s chapters=%d articles=%d type=%s",
+                        fpath.name,
+                        structure.structure_quality,
+                        len(structure.chapters),
+                        len(structure.articles),
+                        structure.doc_type,
+                    )
+
+                    # --- Document profile chunk (for "nima tartibga soladi") ---
+                    prof_text = str(profile.get("profile_text") or profile.get("summary"))
+                    all_ids.append(_stable_id(fpath.name, "profile"))
+                    all_docs.append(prof_text)
+                    all_metas.append(
+                        _chroma_meta(
+                            {
+                                "source": fpath.name,
+                                "path": str(fpath),
+                                "page": -1,
+                                "file_type": fpath.suffix.lower().lstrip(".") or "bin",
+                                "chunk_kind": "doc_profile",
+                                "doc_id": fpath.name,
+                                "article_num": "",
+                                "chapter_num": "",
+                                "heading_path": "document_profile",
+                                "structure_quality": structure.structure_quality,
+                                "doc_type": structure.doc_type,
+                                "chapter_count": profile.get("chapter_count", 0),
+                                "article_count": profile.get("article_count", 0),
                             }
-                            all_ids.append(cid)
-                            all_docs.append(piece)
-                            all_metas.append(meta)
+                        )
+                    )
+
+                    # --- TOC chunk ---
+                    toc_text = build_toc_text(structure, fpath.name)
+                    all_ids.append(_stable_id(fpath.name, "toc"))
+                    all_docs.append(toc_text)
+                    all_metas.append(
+                        _chroma_meta(
+                            {
+                                "source": fpath.name,
+                                "path": str(fpath),
+                                "page": -1,
+                                "file_type": fpath.suffix.lower().lstrip(".") or "bin",
+                                "chunk_kind": "toc",
+                                "doc_id": fpath.name,
+                                "article_num": "",
+                                "chapter_num": "",
+                                "heading_path": "toc",
+                                "structure_quality": structure.structure_quality,
+                                "doc_type": structure.doc_type,
+                                "chapter_count": profile.get("chapter_count", 0),
+                                "article_count": profile.get("article_count", 0),
+                            }
+                        )
+                    )
+
+                    # --- Structure-aware units (modda/bob) or semantic fallback ---
+                    structured = structure_aware_units(
+                        full_text,
+                        structure,
+                        source=fpath.name,
+                        path=str(fpath),
+                        file_type=fpath.suffix.lower().lstrip(".") or "bin",
+                        page_map=page_map,
+                    )
+
+                    if structured:
+                        for idx, unit in enumerate(structured):
+                            body = unit["text"]
+                            # long articles → sub-split but keep metadata
+                            pieces = _split_text(
+                                body, self.chunk_size, self.chunk_overlap
+                            )
+                            if not pieces:
+                                pieces = [body[: self.chunk_size]]
+                            for j, piece in enumerate(pieces):
+                                cid = _stable_id(
+                                    fpath.name,
+                                    unit.get("chunk_kind"),
+                                    unit.get("article_num"),
+                                    unit.get("chapter_num"),
+                                    j,
+                                    piece[:80],
+                                )
+                                meta = {
+                                    "source": fpath.name,
+                                    "path": str(fpath),
+                                    "page": unit.get("page", -1),
+                                    "file_type": unit.get("file_type") or "",
+                                    "chunk_kind": unit.get("chunk_kind") or "article",
+                                    "doc_id": fpath.name,
+                                    "article_num": unit.get("article_num") or "",
+                                    "article_title": unit.get("article_title") or "",
+                                    "chapter_num": unit.get("chapter_num") or "",
+                                    "chapter_title": unit.get("chapter_title") or "",
+                                    "heading_path": unit.get("heading_path") or "",
+                                    "parent_id": unit.get("parent_id") or "",
+                                    "structure_quality": structure.structure_quality,
+                                    "doc_type": structure.doc_type,
+                                    "chunk_index": j,
+                                }
+                                all_ids.append(cid)
+                                all_docs.append(piece)
+                                all_metas.append(_chroma_meta(meta))
+                    else:
+                        # Unstructured: page/paragraph semantic chunks
+                        for unit in page_units:
+                            pieces = _split_text(
+                                unit["text"], self.chunk_size, self.chunk_overlap
+                            )
+                            for idx, piece in enumerate(pieces):
+                                cid = _chunk_id(
+                                    unit["source"], unit.get("page"), idx, piece
+                                )
+                                meta = {
+                                    "source": str(unit["source"]),
+                                    "path": str(unit.get("path") or fpath),
+                                    "page": unit.get("page")
+                                    if unit.get("page") is not None
+                                    else -1,
+                                    "file_type": str(unit.get("file_type") or ""),
+                                    "chunk_kind": "paragraph",
+                                    "doc_id": fpath.name,
+                                    "article_num": "",
+                                    "chapter_num": "",
+                                    "heading_path": "",
+                                    "structure_quality": structure.structure_quality,
+                                    "doc_type": structure.doc_type,
+                                    "chunk_index": idx,
+                                }
+                                all_ids.append(cid)
+                                all_docs.append(piece)
+                                all_metas.append(_chroma_meta(meta))
 
                 total = len(all_docs)
                 # Build into a fresh temp directory, then swap into place. Avoids
@@ -597,6 +805,17 @@ class RAGAgentService:
                 build_dir.rename(index_dir)
                 self._open_chroma(index_dir)
 
+                self._write_profiles(profiles)
+                structure_summary = [
+                    {
+                        "file": p.get("source_file"),
+                        "doc_type": p.get("doc_type"),
+                        "structure_quality": p.get("structure_quality"),
+                        "chapter_count": p.get("chapter_count"),
+                        "article_count": p.get("article_count"),
+                    }
+                    for p in profiles
+                ]
                 manifest = {
                     "provider": self._identity.provider,
                     "model": self._identity.model,
@@ -610,6 +829,8 @@ class RAGAgentService:
                     "docs_dir": str(docs_dir),
                     "index_dir": str(index_dir),
                     "files": [p.name for p in files],
+                    "document_intelligence": True,
+                    "profiles": structure_summary,
                 }
                 self._write_manifest(manifest)
                 self._ready = True
@@ -632,6 +853,7 @@ class RAGAgentService:
                     "identity": self._identity.as_dict(),
                     "index_dir": str(index_dir),
                     "manifest": manifest,
+                    "profiles": structure_summary,
                 }
             except Exception as exc:  # noqa: BLE001
                 self._last_error = str(exc)
@@ -677,6 +899,8 @@ class RAGAgentService:
             "chunk_size": self.chunk_size,
             "chunk_overlap": self.chunk_overlap,
             "manifest": m or None,
+            "profiles_loaded": len(self._profiles or self._read_profiles()),
+            "document_intelligence": True,
             "error": self._last_error,
             "supported_types": sorted(_SUPPORTED_SUFFIXES),
         }
@@ -761,6 +985,109 @@ class RAGAgentService:
                     "sources": [],
                 }
 
+            if not self._profiles:
+                self._profiles = self._read_profiles()
+
+            from agents.doc_structure import format_counts_answer, route_query
+
+            route = route_query(message)
+            mode = "rag_hybrid"
+            sources: list[dict[str, Any]] = []
+            context_blocks: list[str] = []
+
+            # --- Structured counts (nechta bob/modda) — no embedding needed ---
+            if route.wants_counts or "structured_counts" in route.routes:
+                answer = format_counts_answer(self._profiles, message)
+                for p in self._profiles:
+                    sources.append(
+                        {
+                            "file": p.get("source_file"),
+                            "page": None,
+                            "score": 1.0,
+                            "excerpt": (
+                                f"boblar={p.get('chapter_count')}, "
+                                f"moddalar={p.get('article_count')}, "
+                                f"type={p.get('doc_type')}"
+                            ),
+                            "file_type": "profile",
+                            "chunk_kind": "doc_profile",
+                        }
+                    )
+                return {
+                    "success": True,
+                    "response": answer,
+                    "error": None,
+                    "sources": sources,
+                    "backend": "rag",
+                    "embed_provider": self._identity.provider,
+                    "embed_model": self._identity.model,
+                    "embed_dim": self._identity.dim,
+                    "agents_used": ["rag_agent", "structured_counts"],
+                    "mode": "structured_counts",
+                    "route": route.routes,
+                }
+
+            # --- Metadata filters: article / chapter ---
+            where_filter: dict[str, Any] | None = None
+            if route.article_num and "article_lookup" in route.routes:
+                where_filter = {"article_num": str(route.article_num)}
+                mode = "article_lookup"
+            elif route.chapter_num and "chapter_lookup" in route.routes:
+                where_filter = {"chapter_num": str(route.chapter_num)}
+                mode = "chapter_lookup"
+
+            # Hierarchy: which chapter is article N in? answer from metadata
+            if "hierarchy" in route.routes and route.article_num:
+                try:
+                    got = self._collection.get(
+                        where={"article_num": str(route.article_num)},
+                        include=["documents", "metadatas"],
+                    )
+                    metas_h = got.get("metadatas") or []
+                    docs_h = got.get("documents") or []
+                    if metas_h:
+                        m0 = metas_h[0] if isinstance(metas_h[0], dict) else {}
+                        ch_n = m0.get("chapter_num") or "?"
+                        ch_t = m0.get("chapter_title") or ""
+                        path = m0.get("heading_path") or ""
+                        src = m0.get("source") or ""
+                        answer = (
+                            f"{route.article_num}-modda "
+                            f"**{ch_n}-bob**"
+                            + (f" ({ch_t})" if ch_t else "")
+                            + f" ichida joylashgan"
+                            + (f" [{path}]" if path else "")
+                            + (f" — manba: {src}" if src else "")
+                            + "."
+                        )
+                        sources.append(
+                            {
+                                "file": src,
+                                "page": m0.get("page") if m0.get("page") != -1 else None,
+                                "score": 1.0,
+                                "excerpt": (docs_h[0] or "")[:400] if docs_h else path,
+                                "file_type": m0.get("file_type"),
+                                "chunk_kind": m0.get("chunk_kind"),
+                                "article_num": route.article_num,
+                                "chapter_num": ch_n,
+                            }
+                        )
+                        return {
+                            "success": True,
+                            "response": answer,
+                            "error": None,
+                            "sources": sources,
+                            "backend": "rag",
+                            "embed_provider": self._identity.provider,
+                            "embed_model": self._identity.model,
+                            "embed_dim": self._identity.dim,
+                            "agents_used": ["rag_agent", "hierarchy"],
+                            "mode": "hierarchy",
+                            "route": route.routes,
+                        }
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("hierarchy lookup failed: %s", exc)
+
             q_vec = self._embeddings.embed_query(message)
             if len(q_vec) != int(self._identity.dim):
                 return {
@@ -773,23 +1100,46 @@ class RAGAgentService:
                     "sources": [],
                 }
 
-            # Over-fetch then hybrid re-rank (vector + lexical) so short FAQ hits
-            # like "15 ish kuni" are not buried under long PDF noise.
             fetch_k = max(1, min(max(self.top_k * 4, 12), count))
-            result = self._collection.query(
-                query_embeddings=[q_vec],
-                n_results=fetch_k,
-                include=["documents", "metadatas", "distances"],
-            )
+            query_kwargs: dict[str, Any] = {
+                "query_embeddings": [q_vec],
+                "n_results": fetch_k,
+                "include": ["documents", "metadatas", "distances"],
+            }
+            if where_filter:
+                query_kwargs["where"] = where_filter
+                # metadata filter may return fewer hits
+                query_kwargs["n_results"] = max(1, min(fetch_k, 20))
+
+            try:
+                result = self._collection.query(**query_kwargs)
+            except Exception as exc:  # noqa: BLE001
+                # where filter may fail if field missing on older index
+                logger.warning("chroma query with filter failed (%s); plain query", exc)
+                result = self._collection.query(
+                    query_embeddings=[q_vec],
+                    n_results=fetch_k,
+                    include=["documents", "metadatas", "distances"],
+                )
+                mode = "rag_hybrid"
 
             docs = (result.get("documents") or [[]])[0]
             metas = (result.get("metadatas") or [[]])[0]
             dists = (result.get("distances") or [[]])[0]
             ranked = self._hybrid_rank(message, docs, metas, dists)
+
+            # Boost profile/toc chunks when route asks for them
+            if route.wants_profile or route.wants_toc:
+                for item in ranked:
+                    kind = str((item.get("metadata") or {}).get("chunk_kind") or "")
+                    if route.wants_profile and kind == "doc_profile":
+                        item["score"] = float(item.get("score") or 0) + 0.35
+                    if route.wants_toc and kind == "toc":
+                        item["score"] = float(item.get("score") or 0) + 0.35
+                ranked.sort(key=lambda x: float(x.get("score") or 0), reverse=True)
+
             ranked = ranked[: max(1, self.top_k)]
 
-            sources: list[dict[str, Any]] = []
-            context_blocks: list[str] = []
             for i, item in enumerate(ranked):
                 doc = item["document"]
                 meta = item["metadata"] or {}
@@ -803,11 +1153,17 @@ class RAGAgentService:
                     "score": score,
                     "excerpt": (doc or "")[:400],
                     "file_type": meta.get("file_type"),
+                    "chunk_kind": meta.get("chunk_kind"),
+                    "article_num": meta.get("article_num"),
+                    "chapter_num": meta.get("chapter_num"),
+                    "heading_path": meta.get("heading_path"),
                 }
                 sources.append(src)
                 page_s = f" p.{page}" if page is not None else ""
+                path_s = meta.get("heading_path") or ""
+                path_bit = f" [{path_s}]" if path_s else ""
                 context_blocks.append(
-                    f"[{i + 1}] source={meta.get('source')}{page_s}\n{doc}"
+                    f"[{i + 1}] source={meta.get('source')}{page_s}{path_bit}\n{doc}"
                 )
 
             if not context_blocks:
@@ -823,7 +1179,18 @@ class RAGAgentService:
                     "embed_model": self._identity.model,
                     "embed_dim": self._identity.dim,
                     "agents_used": ["rag_agent"],
+                    "mode": mode,
+                    "route": route.routes,
                 }
+
+            # Inject profile counts into context for LLM when useful
+            if self._profiles and (
+                route.wants_profile or "doc_profile" in route.routes
+            ):
+                context_blocks.insert(
+                    0,
+                    "[profiles]\n" + format_counts_answer(self._profiles, message),
+                )
 
             answer = self._generate_answer(message, "\n\n".join(context_blocks))
             return {
@@ -835,8 +1202,9 @@ class RAGAgentService:
                 "embed_provider": self._identity.provider,
                 "embed_model": self._identity.model,
                 "embed_dim": self._identity.dim,
-                "agents_used": ["rag_agent"],
-                "mode": "rag_chroma",
+                "agents_used": ["rag_agent", "document_intelligence"],
+                "mode": mode,
+                "route": route.routes,
             }
         except Exception as exc:  # noqa: BLE001
             logger.error("rag_agent.chat failed: %s", exc, exc_info=True)

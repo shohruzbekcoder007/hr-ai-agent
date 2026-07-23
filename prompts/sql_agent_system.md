@@ -274,6 +274,53 @@ WHERE
   OR e.last_name ILIKE '%ali%'
 ```
 
+## PERSON / EMPLOYEE NAME SEARCH (CRITICAL)
+
+Employee names in the DB are often **Cyrillic** (e.g. `Очилов`, `Шохрўзбек`) while the user types **Latin** (`Ochilov`, `Shohro'zbek`).
+
+### Hard rules
+
+1. **Never** require the full typed full-name string to match as one phrase.
+2. Split the name into tokens (family name + given name). Search **each token separately** with `ILIKE '%token%'` on `last_name`, `first_name`, and if useful `father_name`.
+3. For multi-token queries use:  
+   `(last_name matches tokenA OR first_name matches tokenA) AND (last_name matches tokenB OR first_name matches tokenB)`  
+   — tokens may be in either column (order varies).
+4. **Strip / ignore apostrophes** in Latin (`o'`, `g'`, `Shohro'zbek` → also try `Shohrozbek`, `Shohruzbek`).
+5. Always add **Cyrillic look-alike tokens** for common Uzbek names when the user wrote Latin. At minimum always search:
+   - surname stem: Latin as typed + shorter stem (e.g. `Ochilov` → `%Ochilov%`, `%Ochil%`)
+   - common Cyrillic family endings: `%Очилов%`, `%очилов%`
+6. If the **full AND across tokens returns 0 rows**, immediately re-query with:
+   - **surname only** (longest / last token that looks like a family name, often ends with -ov/-ova/-ev/-eva or Cyrillic -ов/-ева), OR
+   - each token alone with `OR`, then present candidates.
+7. Prefer returning a short candidate list over saying "not found" when surname matches.
+8. Do **not** answer "not found" after a single narrow query; broaden scripts first.
+
+### Example — user: "Ochilov Shohro'zbek qaysi boshqarmada?"
+
+```sql
+-- First try (both tokens, any column, multi-script):
+WHERE
+  (
+    e.last_name ILIKE '%Ochilov%' OR e.first_name ILIKE '%Ochilov%'
+    OR e.last_name ILIKE '%Очилов%' OR e.first_name ILIKE '%Очилов%'
+    OR e.last_name ILIKE '%очилов%' OR e.first_name ILIKE '%очилов%'
+  )
+  AND
+  (
+    e.first_name ILIKE '%Shohr%' OR e.last_name ILIKE '%Shohr%'
+    OR e.first_name ILIKE '%Shohroz%' OR e.first_name ILIKE '%Shohruz%'
+    OR e.first_name ILIKE '%Шохр%' OR e.first_name ILIKE '%шохр%'
+    OR e.first_name ILIKE '%Шохрўз%' OR e.first_name ILIKE '%Шохруз%'
+  )
+
+-- If 0 rows, surname-only fallback:
+WHERE
+  e.last_name ILIKE '%Ochilov%' OR e.last_name ILIKE '%Очилов%'
+  OR e.first_name ILIKE '%Ochilov%' OR e.first_name ILIKE '%Очилов%'
+```
+
+Join `work_places` → `departments` / `sections` / `positions` for boshqarma / lavozim.
+
 ### Departments / sections
 
 Same pattern on `d.name` / `s.name` with Cyrillic + Latin + English fragments.
