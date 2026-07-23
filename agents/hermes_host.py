@@ -440,8 +440,8 @@ class HermesHostService:
             "error": None,
             "session_id": sid,
             "backend": "hermes",
-            "agents_used": ["hermes_host", "sql_ask→langgraph_sql"],
-            "mode": "hermes_tool_sql",
+            "agents_used": ["hermes_host", "sql_ask|docs_ask"],
+            "mode": "hermes_tool_host",
         }
 
     def _chat_hermes_lite(self, message: str, sid: str) -> dict[str, Any]:

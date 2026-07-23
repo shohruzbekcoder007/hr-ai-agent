@@ -72,20 +72,28 @@ def docs_ask_handler(args: dict[str, Any] | None = None, **kwargs: Any) -> str:
             agent.initialize()
         result = agent.chat(question)
 
-        if result.get("success") and result.get("response"):
-            # Include short source list for the host model
-            sources = result.get("sources") or []
-            src_lines = []
+        sources = result.get("sources") or []
+        # Always return structured payload so the host cannot "forget" excerpts.
+        # Put answer + top excerpts (with numbers) in plain text for the model.
+        lines: list[str] = []
+        if result.get("response"):
+            lines.append(str(result["response"]).strip())
+        if sources:
+            lines.append("")
+            lines.append("Retrieved excerpts (use these facts; do not say 'not found' if they answer the question):")
             for s in sources[:5]:
                 if not isinstance(s, dict):
                     continue
                 page = s.get("page")
                 page_s = f" p.{page}" if page is not None else ""
-                src_lines.append(f"- {s.get('file')}{page_s}")
-            text = str(result["response"])
-            if src_lines:
-                text = text + "\n\nSources:\n" + "\n".join(src_lines)
-            return text
+                excerpt = (s.get("excerpt") or "").replace("\n", " ").strip()
+                if len(excerpt) > 280:
+                    excerpt = excerpt[:280] + "…"
+                lines.append(
+                    f"- {s.get('file')}{page_s} (score={s.get('score')}): {excerpt}"
+                )
+        if lines:
+            return "\n".join(lines)
 
         return json.dumps(
             {
@@ -93,7 +101,7 @@ def docs_ask_handler(args: dict[str, Any] | None = None, **kwargs: Any) -> str:
                 "answer": result.get("response"),
                 "error": result.get("error"),
                 "error_code": result.get("error_code"),
-                "sources": result.get("sources"),
+                "sources": sources,
             },
             ensure_ascii=False,
             default=str,

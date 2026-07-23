@@ -49,7 +49,8 @@ services:
       SELF_IMPROVE_MAX_RECIPES: ${SELF_IMPROVE_MAX_RECIPES:-500}
       RAG_ENABLED: ${RAG_ENABLED:-true}
       RAG_DOCS_DIR: ${RAG_DOCS_DIR:-/app/data/docs}
-      RAG_CHROMA_ROOT: ${RAG_CHROMA_ROOT:-/app/data/rag/chroma}
+      # Named volume (not Windows bind mount) — SQLite/Chroma stays writable
+      RAG_CHROMA_ROOT: ${RAG_CHROMA_ROOT:-/home/appuser/.rag/chroma}
       RAG_EMBED_PROVIDER: ${RAG_EMBED_PROVIDER:-openai}
       RAG_EMBED_MODEL: ${RAG_EMBED_MODEL:-text-embedding-3-small}
       RAG_EMBED_DIM: ${RAG_EMBED_DIM:-}
@@ -68,6 +69,7 @@ services:
     volumes:
       - ./logs:/app/logs:rw
       - ./data:/app/data:rw
+      - rag_chroma:/home/appuser/.rag/chroma:rw
       - ./config:/app/config:ro
       - ./prompts:/app/prompts:ro
       - ./plugins:/app/plugins:ro
@@ -87,6 +89,10 @@ services:
 
     security_opt:
       - no-new-privileges:true
+
+volumes:
+  rag_chroma:
+    name: ai-agents-rag-chroma
 
 networks:
   default:

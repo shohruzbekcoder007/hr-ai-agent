@@ -61,7 +61,14 @@ def _docs_dir() -> Path:
 
 
 def _chroma_root() -> Path:
-    return Path(_env("RAG_CHROMA_ROOT") or str(_repo_root() / "data" / "rag" / "chroma"))
+    # Prefer container path (named volume). Avoid Windows bind-mount SQLite
+    # "readonly database" (code 1032) on Docker Desktop.
+    default_linux = "/home/appuser/.rag/chroma"
+    if Path("/home/appuser").is_dir():
+        fallback = default_linux
+    else:
+        fallback = str(_repo_root() / "data" / "rag" / "chroma")
+    return Path(_env("RAG_CHROMA_ROOT") or fallback)
 
 
 def _prompt_path() -> Path:
@@ -417,6 +424,105 @@ class RAGAgentService:
         except Exception:  # noqa: BLE001
             return 0
 
+    @staticmethod
+    def _normalize_text(text: str) -> str:
+        """Fold apostrophes so ta'til ≈ tatil for matching."""
+        t = (text or "").lower()
+        for ch in ("'", "'", "ʻ", "ʼ", "`", "´"):
+            t = t.replace(ch, "")
+        return t
+
+    @classmethod
+    def _tokens(cls, text: str) -> set[str]:
+        import re
+
+        t = cls._normalize_text(text)
+        return {tok for tok in re.findall(r"[0-9A-Za-zЀ-ӿ]+", t) if len(tok) >= 2}
+
+    def _hybrid_rank(
+        self,
+        query: str,
+        docs: list[Any],
+        metas: list[Any],
+        dists: list[Any],
+    ) -> list[dict[str, Any]]:
+        """Blend vector similarity with simple token overlap (FAQ-friendly)."""
+        q_norm = self._normalize_text(query)
+        q_tok = self._tokens(query)
+        # Topic flags after apostrophe-folding
+        q_about_leave = any(
+            k in q_norm
+            for k in ("tatil", "otpusk", "таътил", "отпуск", "leave", "vacation")
+        )
+
+        ranked: list[dict[str, Any]] = []
+        for i, doc in enumerate(docs):
+            meta = metas[i] if i < len(metas) else {}
+            dist = dists[i] if i < len(dists) else None
+            vec_score = 0.0
+            if dist is not None:
+                try:
+                    vec_score = 1.0 - float(dist)
+                except (TypeError, ValueError):
+                    vec_score = 0.0
+            doc_s = str(doc or "")
+            d_norm = self._normalize_text(doc_s)
+            d_tok = self._tokens(doc_s)
+            if q_tok and d_tok:
+                lex = len(q_tok & d_tok) / max(1, len(q_tok))
+            else:
+                lex = 0.0
+            # Substring boosts: ta'til query must still hit "tatil" FAQ lines
+            if q_about_leave and "tatil" in d_norm:
+                lex = max(lex, 0.55)
+            if q_about_leave and any(
+                n in d_norm for n in ("15 ish", "21 kalendar", "21 календар", "yiliga 15")
+            ):
+                lex = max(lex, 0.75)
+            ftype = str((meta or {}).get("file_type") or "")
+            faq_bonus = (
+                0.12 if ftype in {"txt", "md", "markdown"} and lex >= 0.4 else 0.0
+            )
+            score = round(0.55 * vec_score + 0.45 * lex + faq_bonus, 4)
+            ranked.append(
+                {
+                    "document": doc,
+                    "metadata": meta if isinstance(meta, dict) else {},
+                    "score": score,
+                    "vec_score": round(vec_score, 4),
+                    "lex_score": round(lex, 4),
+                }
+            )
+        ranked.sort(key=lambda x: x["score"], reverse=True)
+        return ranked
+
+    def _add_batches(
+        self,
+        all_ids: list[str],
+        all_docs: list[str],
+        all_metas: list[dict[str, Any]],
+    ) -> None:
+        total = len(all_docs)
+        for start in range(0, total, max(1, self.batch_size)):
+            end = min(start + self.batch_size, total)
+            batch_docs = all_docs[start:end]
+            batch_ids = all_ids[start:end]
+            batch_metas = all_metas[start:end]
+            vectors = self._embeddings.embed_documents(batch_docs)
+            if vectors and len(vectors[0]) != int(self._identity.dim):
+                actual = len(vectors[0])
+                raise RuntimeError(
+                    f"Embedding dimension mismatch: config dim={self._identity.dim} "
+                    f"but model returned {actual}. Set RAG_EMBED_DIM={actual} "
+                    "and reindex."
+                )
+            self._collection.add(
+                ids=batch_ids,
+                documents=batch_docs,
+                metadatas=batch_metas,
+                embeddings=vectors,
+            )
+
     def reindex(self, force: bool = True) -> dict[str, Any]:
         """Full rebuild of Chroma for the **current** embed identity."""
         del force  # always full rebuild for safety across dim/model
@@ -436,16 +542,6 @@ class RAGAgentService:
                 self._identity = get_embed_identity()
                 self._embeddings = get_embeddings(self._identity)
                 index_dir = self._index_dir()
-
-                # Must close open clients BEFORE deleting the directory, otherwise
-                # SQLite/Chroma returns "attempt to write a readonly database".
-                self._close_chroma()
-                if index_dir.exists():
-                    shutil.rmtree(index_dir, ignore_errors=True)
-                index_dir.mkdir(parents=True, exist_ok=True)
-
-                self._open_chroma(index_dir)
-
                 docs_dir = _docs_dir()
                 files = discover_files(docs_dir)
                 all_ids: list[str] = []
@@ -482,37 +578,24 @@ class RAGAgentService:
                             all_docs.append(piece)
                             all_metas.append(meta)
 
-                # Embed + add in batches
                 total = len(all_docs)
-                for start in range(0, total, max(1, self.batch_size)):
-                    end = min(start + self.batch_size, total)
-                    batch_docs = all_docs[start:end]
-                    batch_ids = all_ids[start:end]
-                    batch_metas = all_metas[start:end]
-                    vectors = self._embeddings.embed_documents(batch_docs)
-                    # Guard dim on first batch
-                    if vectors and len(vectors[0]) != int(self._identity.dim):
-                        actual = len(vectors[0])
-                        logger.warning(
-                            "Embedding dim mismatch config=%s actual=%s — "
-                            "updating identity dim to actual for manifest",
-                            self._identity.dim,
-                            actual,
-                        )
-                        # Rebuild identity-like fields for manifest; path already chosen
-                        # by configured dim — if actual differs, fail hard to avoid
-                        # silent wrong geometry in HNSW.
-                        raise RuntimeError(
-                            f"Embedding dimension mismatch: config dim={self._identity.dim} "
-                            f"but model returned {actual}. Set RAG_EMBED_DIM={actual} "
-                            "and reindex."
-                        )
-                    self._collection.add(
-                        ids=batch_ids,
-                        documents=batch_docs,
-                        metadatas=batch_metas,
-                        embeddings=vectors,
-                    )
+                # Build into a fresh temp directory, then swap into place. Avoids
+                # SQLite "readonly database" when an open Chroma handle still
+                # points at a deleted/bind-mounted path (esp. Docker Desktop).
+                build_dir = index_dir.parent / f".build_{index_dir.name}_{int(time.time())}"
+                if build_dir.exists():
+                    shutil.rmtree(build_dir, ignore_errors=True)
+                build_dir.mkdir(parents=True, exist_ok=True)
+
+                self._close_chroma()
+                self._open_chroma(build_dir)
+                self._add_batches(all_ids, all_docs, all_metas)
+
+                self._close_chroma()
+                if index_dir.exists():
+                    shutil.rmtree(index_dir, ignore_errors=True)
+                build_dir.rename(index_dir)
+                self._open_chroma(index_dir)
 
                 manifest = {
                     "provider": self._identity.provider,
@@ -533,11 +616,12 @@ class RAGAgentService:
                 self._last_error = None
                 elapsed = round(time.time() - t0, 2)
                 logger.info(
-                    "RAG reindex done files=%d chunks=%d dim=%d in %ss",
+                    "RAG reindex done files=%d chunks=%d dim=%d in %ss path=%s",
                     len(files),
                     total,
                     self._identity.dim,
                     elapsed,
+                    index_dir,
                 )
                 return {
                     "success": True,
@@ -552,6 +636,7 @@ class RAGAgentService:
             except Exception as exc:  # noqa: BLE001
                 self._last_error = str(exc)
                 self._ready = False
+                self._close_chroma()
                 logger.error("RAG reindex failed: %s", exc, exc_info=True)
                 return {
                     "success": False,
@@ -688,29 +773,27 @@ class RAGAgentService:
                     "sources": [],
                 }
 
-            k = max(1, min(self.top_k, count))
+            # Over-fetch then hybrid re-rank (vector + lexical) so short FAQ hits
+            # like "15 ish kuni" are not buried under long PDF noise.
+            fetch_k = max(1, min(max(self.top_k * 4, 12), count))
             result = self._collection.query(
                 query_embeddings=[q_vec],
-                n_results=k,
+                n_results=fetch_k,
                 include=["documents", "metadatas", "distances"],
             )
 
             docs = (result.get("documents") or [[]])[0]
             metas = (result.get("metadatas") or [[]])[0]
             dists = (result.get("distances") or [[]])[0]
+            ranked = self._hybrid_rank(message, docs, metas, dists)
+            ranked = ranked[: max(1, self.top_k)]
 
             sources: list[dict[str, Any]] = []
             context_blocks: list[str] = []
-            for i, doc in enumerate(docs):
-                meta = metas[i] if i < len(metas) else {}
-                dist = dists[i] if i < len(dists) else None
-                # cosine distance → similarity-ish score
-                score = None
-                if dist is not None:
-                    try:
-                        score = round(1.0 - float(dist), 4)
-                    except (TypeError, ValueError):
-                        score = None
+            for i, item in enumerate(ranked):
+                doc = item["document"]
+                meta = item["metadata"] or {}
+                score = item.get("score")
                 page = meta.get("page")
                 if page == -1:
                     page = None

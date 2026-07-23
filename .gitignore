@@ -54,6 +54,11 @@ data/*.json
 data/*.json.tmp
 !data/.gitkeep
 
+# RAG: user PDFs/Word/FAQ + local Chroma indexes (not for git)
+data/rag/**
+!data/rag/.gitkeep
+!data/rag/chroma/.gitkeep
+
 # IDE / OS
 .idea/
 .vscode/
