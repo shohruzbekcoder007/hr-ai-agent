@@ -2,10 +2,15 @@
 Embedding factory for the RAG agent.
 
 Only reads RAG_EMBED_* (and fallbacks OPENAI_*) env vars — no hard-coded model
-choice in callers. Switch provider/model via env, then full reindex.
+in callers. Switch provider/model via env, then full reindex.
+
+Providers:
+  - remote | http  → embedding-service HTTP API (preferred in Docker)
+  - openai         → langchain_openai (in-process)
+  - local | huggingface → sentence-transformers / HF
 
 Dimension isolation: every (provider, model, dim) maps to a unique index_key so
-OpenAI 1536/3072 vectors never mix with BAAI/bge-m3 1024 (etc.).
+vectors from different models never share one Chroma directory.
 """
 
 from __future__ import annotations
@@ -18,7 +23,7 @@ from typing import Any, Optional, Protocol, runtime_checkable
 
 logger = logging.getLogger("embeddings")
 
-# Known defaults when RAG_EMBED_DIM is unset.
+# Known defaults when RAG_EMBED_DIM is unset (in-process providers).
 _DEFAULT_DIMS: dict[str, int] = {
     "text-embedding-3-small": 1536,
     "text-embedding-3-large": 3072,
@@ -65,6 +70,7 @@ class EmbedIdentity:
     api_key: str
     base_url: Optional[str]
     device: str
+    remote_url: str = ""
 
     @property
     def index_key(self) -> str:
@@ -79,6 +85,7 @@ class EmbedIdentity:
             "device": self.device,
             "base_url_set": bool(self.base_url),
             "api_key_set": bool(self.api_key),
+            "remote_url": self.remote_url or None,
         }
 
 
@@ -88,12 +95,10 @@ def resolve_dim(provider: str, model: str, explicit: Optional[int]) -> int:
     key = (model or "").strip().lower()
     if key in _DEFAULT_DIMS:
         return _DEFAULT_DIMS[key]
-    # HuggingFace-style org/name
     if key.endswith("/bge-m3") or key.endswith("bge-m3"):
         return 1024
     if provider in {"local", "huggingface", "hf"}:
         return 1024
-    # OpenAI family fallback
     if "large" in key:
         return 3072
     if "small" in key or "ada" in key:
@@ -101,14 +106,31 @@ def resolve_dim(provider: str, model: str, explicit: Optional[int]) -> int:
     return 1536
 
 
-def get_embed_identity() -> EmbedIdentity:
-    provider = (_env("RAG_EMBED_PROVIDER") or "openai").lower()
-    if provider in {"hf", "huggingface"}:
-        # Alias: HF inference may use base_url; local weights use "local"
+def _resolve_provider_name() -> str:
+    """
+    remote | http if RAG_EMBED_URL set and provider unset/remote;
+    else openai | local | huggingface.
+    """
+    raw = (_env("RAG_EMBED_PROVIDER") or "").lower()
+    url = _env("RAG_EMBED_URL")
+    if raw in {"remote", "http"}:
+        return "remote"
+    if not raw and url:
+        return "remote"
+    if not raw:
+        return "openai"
+    if raw in {"hf", "huggingface"}:
         if _env("RAG_EMBED_BASE_URL"):
-            provider = "huggingface"
-        else:
-            provider = "local"
+            return "huggingface"
+        return "local"
+    return raw
+
+
+def get_embed_identity() -> EmbedIdentity:
+    provider = _resolve_provider_name()
+
+    if provider == "remote":
+        return _remote_identity()
 
     model = _env("RAG_EMBED_MODEL") or "text-embedding-3-small"
     explicit_dim = _env_int("RAG_EMBED_DIM", None)
@@ -132,7 +154,99 @@ def get_embed_identity() -> EmbedIdentity:
         api_key=api_key,
         base_url=base_url,
         device=device,
+        remote_url="",
     )
+
+
+def _remote_base_url() -> str:
+    url = (_env("RAG_EMBED_URL") or "http://127.0.0.1:8090").rstrip("/")
+    if not url:
+        raise RuntimeError(
+            "RAG_EMBED_PROVIDER=remote requires RAG_EMBED_URL "
+            "(e.g. http://host.docker.internal:8090)"
+        )
+    return url
+
+
+def _remote_headers() -> dict[str, str]:
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    token = (
+        _env("RAG_EMBED_BEARER_TOKEN")
+        or _env("EMBED_API_BEARER_TOKEN")
+        or _env("API_BEARER_TOKEN")
+    )
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _fetch_remote_info(base_url: str) -> dict[str, Any]:
+    import httpx
+
+    timeout = float(_env("RAG_EMBED_TIMEOUT") or "60")
+    with httpx.Client(timeout=timeout, headers=_remote_headers()) as client:
+        # Prefer /v1/info; fall back to /ready
+        for path in ("/v1/info", "/ready"):
+            try:
+                r = client.get(f"{base_url}{path}")
+                if r.status_code >= 400:
+                    continue
+                data = r.json()
+                if isinstance(data, dict):
+                    return data
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("remote info %s failed: %s", path, exc)
+    raise RuntimeError(
+        f"Cannot reach embedding-service at {base_url} "
+        "(GET /v1/info or /ready failed). Is it running?"
+    )
+
+
+def _remote_identity() -> EmbedIdentity:
+    """
+    Identity comes from the remote service so index_key matches the
+    vectors it actually produces (provider/model may differ from local env).
+    """
+    base_url = _remote_base_url()
+    info = _fetch_remote_info(base_url)
+
+    # Nested identity object from embedding-service readiness
+    nested = info.get("identity") if isinstance(info.get("identity"), dict) else {}
+    provider = str(
+        nested.get("provider") or info.get("provider") or "remote"
+    ).strip() or "remote"
+    model = str(
+        nested.get("model")
+        or info.get("model")
+        or _env("RAG_EMBED_MODEL")
+        or "unknown"
+    ).strip()
+    dim_raw = nested.get("dim") if nested.get("dim") is not None else info.get("dim")
+    try:
+        dim = int(dim_raw) if dim_raw is not None else 0
+    except (TypeError, ValueError):
+        dim = 0
+    if dim <= 0:
+        dim = resolve_dim(provider, model, _env_int("RAG_EMBED_DIM", None))
+
+    # Prefer remote index_key if present and consistent
+    remote_key = nested.get("index_key") or info.get("index_key")
+    ident = EmbedIdentity(
+        provider=provider,
+        model=model,
+        dim=dim,
+        api_key="",
+        base_url=None,
+        device=str(nested.get("device") or info.get("device") or "cpu"),
+        remote_url=base_url,
+    )
+    if remote_key and str(remote_key) != ident.index_key:
+        logger.warning(
+            "Remote index_key=%s differs from local build=%s — using remote fields",
+            remote_key,
+            ident.index_key,
+        )
+    return ident
 
 
 def get_embeddings(identity: EmbedIdentity | None = None) -> Any:
@@ -140,18 +254,20 @@ def get_embeddings(identity: EmbedIdentity | None = None) -> Any:
     Build an embeddings client from env only.
 
     Providers:
-      - openai (default): langchain_openai.OpenAIEmbeddings
-      - local: sentence-transformers / HuggingFaceEmbeddings (e.g. BAAI/bge-m3)
-      - huggingface: OpenAI-compatible or HF endpoint via base_url when set;
-        otherwise same as local
+      - remote | http: embedding-service (HTTP)
+      - openai: langchain_openai.OpenAIEmbeddings
+      - local / huggingface: sentence-transformers / HF
     """
     ident = identity or get_embed_identity()
     provider = ident.provider
 
+    # If identity came from remote, client is always HTTP
+    if ident.remote_url or _resolve_provider_name() == "remote":
+        return _remote_embeddings(ident)
+
     if provider == "openai":
         return _openai_embeddings(ident)
     if provider in {"local", "huggingface"}:
-        # If base_url set and provider huggingface → try OpenAI-compatible first
         if provider == "huggingface" and ident.base_url:
             try:
                 return _openai_embeddings(ident)
@@ -165,7 +281,115 @@ def get_embeddings(identity: EmbedIdentity | None = None) -> Any:
 
     raise ValueError(
         f"Unknown RAG_EMBED_PROVIDER={provider!r}. "
-        "Use: openai | local | huggingface"
+        "Use: remote | http | openai | local | huggingface"
+    )
+
+
+class RemoteHTTPEmbeddings:
+    """
+    LangChain-compatible client for embedding-service.
+
+    Methods: embed_query, embed_documents
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        batch_size: int = 32,
+        timeout: float = 120.0,
+        expected_dim: Optional[int] = None,
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.batch_size = max(1, batch_size)
+        self.timeout = timeout
+        self.expected_dim = expected_dim
+
+    def embed_query(self, text: str) -> list[float]:
+        import httpx
+
+        payload = {"text": text, "input_type": "query"}
+        with httpx.Client(timeout=self.timeout, headers=_remote_headers()) as client:
+            r = client.post(f"{self.base_url}/v1/embed", json=payload)
+            if r.status_code >= 400:
+                raise RuntimeError(
+                    f"remote embed failed HTTP {r.status_code}: {r.text[:500]}"
+                )
+            data = r.json()
+        vec = data.get("embedding")
+        if not isinstance(vec, list) or not vec:
+            raise RuntimeError("remote embed: missing embedding in response")
+        return self._check_dim([float(x) for x in vec], data.get("dim"))
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        import httpx
+
+        if not texts:
+            return []
+        out: list[list[float]] = []
+        # Honor service EMBED_BATCH_MAX (default 64); use our batch_size
+        step = self.batch_size
+        with httpx.Client(timeout=self.timeout, headers=_remote_headers()) as client:
+            for start in range(0, len(texts), step):
+                chunk = texts[start : start + step]
+                payload = {"texts": chunk, "input_type": "document"}
+                r = client.post(f"{self.base_url}/v1/embed/batch", json=payload)
+                if r.status_code >= 400:
+                    raise RuntimeError(
+                        f"remote embed/batch failed HTTP {r.status_code}: "
+                        f"{r.text[:500]}"
+                    )
+                data = r.json()
+                vectors = data.get("embeddings")
+                if not isinstance(vectors, list) or len(vectors) != len(chunk):
+                    raise RuntimeError(
+                        "remote embed/batch: embeddings count mismatch "
+                        f"(got {len(vectors) if isinstance(vectors, list) else None}, "
+                        f"expected {len(chunk)})"
+                    )
+                dim = data.get("dim")
+                for v in vectors:
+                    out.append(self._check_dim([float(x) for x in v], dim))
+        return out
+
+    def _check_dim(
+        self, vec: list[float], reported_dim: Any = None
+    ) -> list[float]:
+        if self.expected_dim and len(vec) != int(self.expected_dim):
+            raise RuntimeError(
+                f"Remote embedding dim {len(vec)} != expected {self.expected_dim}"
+            )
+        if reported_dim is not None:
+            try:
+                rd = int(reported_dim)
+                if rd and len(vec) != rd:
+                    logger.warning(
+                        "Remote reported dim=%s but vector length=%s",
+                        rd,
+                        len(vec),
+                    )
+            except (TypeError, ValueError):
+                pass
+        return vec
+
+
+def _remote_embeddings(ident: EmbedIdentity) -> RemoteHTTPEmbeddings:
+    base = ident.remote_url or _remote_base_url()
+    batch = _env_int("RAG_EMBED_BATCH_SIZE", 32) or 32
+    # Service default max is 64 — cap client batch
+    batch = min(batch, _env_int("RAG_EMBED_REMOTE_BATCH_MAX", 64) or 64)
+    timeout = float(_env("RAG_EMBED_TIMEOUT") or "120")
+    logger.info(
+        "Using remote embedding-service url=%s expected_dim=%s batch=%s",
+        base,
+        ident.dim,
+        batch,
+    )
+    return RemoteHTTPEmbeddings(
+        base,
+        batch_size=batch,
+        timeout=timeout,
+        expected_dim=ident.dim,
     )
 
 
@@ -183,8 +407,6 @@ def _openai_embeddings(ident: EmbedIdentity) -> Any:
     }
     if ident.base_url:
         kwargs["base_url"] = ident.base_url
-    # OpenAI embedding-3 supports dimensions= for reduced size; include when set
-    # via RAG_EMBED_DIM (and model is not ada-002 which ignores it).
     explicit = _env_int("RAG_EMBED_DIM", None)
     if explicit and explicit > 0 and "ada-002" not in (ident.model or "").lower():
         kwargs["dimensions"] = explicit

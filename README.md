@@ -30,16 +30,20 @@ LLM_MODEL=gpt-4.1
 HERMES_SKIP_MEMORY=false
 HERMES_ENABLED_TOOLSETS=sql_bridge,docs_bridge
 
-# Document RAG (default OpenAI embeddings → Chroma on volume)
+# Document RAG + embeddings
 RAG_ENABLED=true
 RAG_DOCS_DIR=./data/docs
 RAG_CHROMA_ROOT=./data/rag/chroma
-RAG_EMBED_PROVIDER=openai
-RAG_EMBED_MODEL=text-embedding-3-small
-# RAG_EMBED_DIM=          # optional; included in index path
-# Local bge-m3 (after: pip install -r requirements-rag-local.txt):
-# RAG_EMBED_PROVIDER=local
-# RAG_EMBED_MODEL=BAAI/bge-m3
+
+# Preferred: remote embedding-service (sibling d:\GROK\embedding-service)
+RAG_EMBED_PROVIDER=remote
+RAG_EMBED_URL=http://host.docker.internal:8090
+# RAG_EMBED_BEARER_TOKEN=
+
+# In-process fallback (no separate service):
+# RAG_EMBED_PROVIDER=openai
+# RAG_EMBED_MODEL=text-embedding-3-small
+# Local bge-m3: RAG_EMBED_PROVIDER=local + requirements-rag-local.txt
 ```
 
 ## API
@@ -62,8 +66,16 @@ RAG_EMBED_MODEL=text-embedding-3-small
 2. `POST /v1/docs/reindex` (same bearer as chat if `API_BEARER_TOKEN` set).
 3. Ask via `POST /v1/docs/chat` or host chat (`docs_ask`).
 
-**Embedding switch:** change `RAG_EMBED_PROVIDER` / `RAG_EMBED_MODEL` / `RAG_EMBED_DIM`, then **full reindex**.  
-Each `(provider, model, dim)` has its own folder under `data/rag/chroma/` so dimensions never mix. Old indexes stay on disk for rollback (restore env, no reindex).
+**Embedding switch:** change model on **embedding-service** env (or local `RAG_EMBED_*`), then **full reindex** here (`POST /v1/docs/reindex`).  
+`index_key` comes from the embed service (`provider__model__d{dim}`); Chroma paths never mix dimensions.
+
+```bash
+# Terminal 1 — embedding service
+cd ../embedding-service && python -m app.main
+
+# Terminal 2 — this app (after RAG_EMBED_PROVIDER=remote)
+curl -X POST http://127.0.0.1:8080/v1/docs/reindex
+```
 
 ## Self-improving (global recipe store)
 
