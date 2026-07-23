@@ -130,6 +130,17 @@ class HermesHostService:
                 logger.debug("register_hermes_tools: %s", exc)
 
             try:
+                from agents.rag_agent import is_enabled as rag_enabled
+                from agents.rag_bridge_tool import (
+                    register_hermes_tools as register_docs_tools,
+                )
+
+                if rag_enabled():
+                    register_docs_tools()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("register_docs_tools: %s", exc)
+
+            try:
                 from hermes_cli.plugins import discover_plugins  # type: ignore
 
                 discover_plugins()
@@ -190,11 +201,7 @@ class HermesHostService:
             "model": self.model_name,
             "quiet_mode": _env_bool("HERMES_QUIET_MODE", True),
             "max_iterations": self.max_iterations,
-            "enabled_toolsets": [
-                t.strip()
-                for t in (_env("HERMES_ENABLED_TOOLSETS") or "sql_bridge").split(",")
-                if t.strip()
-            ],
+            "enabled_toolsets": self._enabled_toolsets(),
             "skip_memory": self.skip_memory,
             "skip_context_files": _env_bool("HERMES_SKIP_CONTEXT_FILES", True),
             "ephemeral_system_prompt": self.system_prompt,
@@ -207,12 +214,46 @@ class HermesHostService:
         # OpenAI path: don't force provider string
         return kwargs
 
+    def _enabled_toolsets(self) -> list[str]:
+        """
+        Parse HERMES_ENABLED_TOOLSETS. When RAG is on, ensure docs_bridge is
+        present even if .env only lists sql_bridge (common misconfig).
+        """
+        raw = _env("HERMES_ENABLED_TOOLSETS") or "sql_bridge,docs_bridge"
+        sets = [t.strip() for t in raw.split(",") if t.strip()]
+        if not sets:
+            sets = ["sql_bridge"]
+        try:
+            from agents.rag_agent import is_enabled as rag_enabled
+
+            if rag_enabled() and "docs_bridge" not in sets:
+                sets.append("docs_bridge")
+                logger.info(
+                    "RAG enabled — appended docs_bridge to toolsets → %s", sets
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("toolset RAG check: %s", exc)
+        return sets
+
+    def _host_langchain_tools(self) -> list[Any]:
+        """sql_ask (+ docs_ask when RAG enabled)."""
+        from agents.sql_bridge_tool import as_langchain_tool
+
+        tools: list[Any] = [as_langchain_tool()]
+        try:
+            from agents.rag_agent import is_enabled as rag_enabled
+            from agents.rag_bridge_tool import as_langchain_tool as docs_tool
+
+            if rag_enabled():
+                tools.append(docs_tool())
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("docs_ask tool not added to hermes_lite: %s", exc)
+        return tools
+
     def _try_init_hermes_lite(self) -> bool:
         try:
             from langchain_openai import ChatOpenAI
             from langgraph.prebuilt import create_react_agent
-
-            from agents.sql_bridge_tool import as_langchain_tool
 
             llm_kwargs: dict[str, Any] = {
                 "model": self.model_name,
@@ -222,8 +263,8 @@ class HermesHostService:
             if self.base_url:
                 llm_kwargs["base_url"] = self.base_url
             llm = ChatOpenAI(**llm_kwargs)
-            tools = [as_langchain_tool()]
-            # Host agent: only sql_ask tool; SQL internals stay in LangGraph SQL agent
+            tools = self._host_langchain_tools()
+            # Host: sql_ask (+ docs_ask); SQL/RAG internals stay in their agents
             self._lite_graph = create_react_agent(
                 llm,
                 tools,
@@ -236,8 +277,6 @@ class HermesHostService:
                 from langchain_openai import ChatOpenAI
                 from langgraph.prebuilt import create_react_agent
 
-                from agents.sql_bridge_tool import as_langchain_tool
-
                 llm_kwargs = {
                     "model": self.model_name,
                     "api_key": self.api_key,
@@ -246,7 +285,9 @@ class HermesHostService:
                 if self.base_url:
                     llm_kwargs["base_url"] = self.base_url
                 llm = ChatOpenAI(**llm_kwargs)
-                self._lite_graph = create_react_agent(llm, [as_langchain_tool()])
+                self._lite_graph = create_react_agent(
+                    llm, self._host_langchain_tools()
+                )
                 return True
             except Exception as exc:  # noqa: BLE001
                 self._last_error = f"hermes_lite init failed: {exc}"
